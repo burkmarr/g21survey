@@ -1,0 +1,7 @@
+org.g21survey.app-pngs-0 E:\g21survey\app\build\generated\res\pngs\debug
+org.g21survey.app-resValues-1 E:\g21survey\app\build\generated\res\resValues\debug
+org.g21survey.app-packageDebugResources-2 E:\g21survey\app\build\intermediates\incremental\debug\packageDebugResources\merged.dir
+org.g21survey.app-packageDebugResources-3 E:\g21survey\app\build\intermediates\incremental\debug\packageDebugResources\stripped.dir
+org.g21survey.app-debug-4 E:\g21survey\app\build\intermediates\merged_res\debug\mergeDebugResources
+org.g21survey.app-debug-5 E:\g21survey\app\src\debug\res
+org.g21survey.app-main-6 E:\g21survey\app\src\main\res

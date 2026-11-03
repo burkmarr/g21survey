@@ -1,0 +1,55 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="org.g21survey.app"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="23"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+11-->E:\g21survey\app\src\main\AndroidManifest.xml:2:5-79
+11-->E:\g21survey\app\src\main\AndroidManifest.xml:2:22-76
+12
+13    <uses-feature
+13-->E:\g21survey\app\src\main\AndroidManifest.xml:3:5-5:36
+14        android:name="android.hardware.location.gps"
+14-->E:\g21survey\app\src\main\AndroidManifest.xml:4:9-53
+15        android:required="false" />
+15-->E:\g21survey\app\src\main\AndroidManifest.xml:5:9-33
+16
+17    <application
+17-->E:\g21survey\app\src\main\AndroidManifest.xml:7:5-21:19
+18        android:allowBackup="false"
+18-->E:\g21survey\app\src\main\AndroidManifest.xml:8:9-36
+19        android:debuggable="true"
+20        android:extractNativeLibs="false"
+21        android:label="g21 Survey"
+21-->E:\g21survey\app\src\main\AndroidManifest.xml:9:9-35
+22        android:supportsRtl="true"
+22-->E:\g21survey\app\src\main\AndroidManifest.xml:10:9-35
+23        android:theme="@android:style/Theme.Material.Light.NoActionBar" >
+23-->E:\g21survey\app\src\main\AndroidManifest.xml:11:9-72
+24        <activity
+24-->E:\g21survey\app\src\main\AndroidManifest.xml:12:9-20:20
+25            android:name="org.g21survey.app.MainActivity"
+25-->E:\g21survey\app\src\main\AndroidManifest.xml:13:13-41
+26            android:configChanges="orientation|screenSize"
+26-->E:\g21survey\app\src\main\AndroidManifest.xml:14:13-59
+27            android:exported="true" >
+27-->E:\g21survey\app\src\main\AndroidManifest.xml:15:13-36
+28            <intent-filter>
+28-->E:\g21survey\app\src\main\AndroidManifest.xml:16:13-19:29
+29                <action android:name="android.intent.action.MAIN" />
+29-->E:\g21survey\app\src\main\AndroidManifest.xml:17:17-69
+29-->E:\g21survey\app\src\main\AndroidManifest.xml:17:25-66
+30
+31                <category android:name="android.intent.category.LAUNCHER" />
+31-->E:\g21survey\app\src\main\AndroidManifest.xml:18:17-77
+31-->E:\g21survey\app\src\main\AndroidManifest.xml:18:27-74
+32            </intent-filter>
+33        </activity>
+34    </application>
+35
+36</manifest>

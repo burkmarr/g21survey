@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build debug APK",
+      "type": "shell",
+      "command": "gradle assembleDebug",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Install on phone",
+      "type": "shell",
+      "command": "gradle installDebug",
+      "problemMatcher": []
+    },
+    {
+      "label": "Launch on phone",
+      "type": "shell",
+      "command": "adb shell am start -n org.g21survey.app/.MainActivity",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run unit tests",
+      "type": "shell",
+      "command": "gradle test",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Clean",
+      "type": "shell",
+      "command": "gradle clean",
+      "problemMatcher": []
+    }
+  ]
+}
