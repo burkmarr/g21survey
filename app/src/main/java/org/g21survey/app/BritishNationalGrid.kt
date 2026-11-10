@@ -1,16 +1,25 @@
 package org.g21survey.app
 
-import kotlin.math.atan2
+import android.content.res.AssetManager
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
-/** Converts WGS84 latitude/longitude (degrees) to EPSG:27700 easting/northing using the OS Helmert + TM formulas. */
 object BritishNationalGrid {
-    private const val WGS84_A = 6378137.0
-    private const val WGS84_B = 6356752.314245
+    private const val GRID_ASSET_NAME = "ostn15-etrs-to-osgb.bin"
+    private const val GRID_ROWS = 1441
+    private const val GRID_COLUMNS = 661
+    private const val GRID_HEADER_BYTES = 48
+    private const val SOUTH_LATITUDE_SECONDS = 176400.0
+    private const val EAST_LONGITUDE_SECONDS = -7200.0
+    private const val LATITUDE_INCREMENT_SECONDS = 30.0
+    private const val LONGITUDE_INCREMENT_SECONDS = 60.0
     private const val AIRY_A = 6377563.396
     private const val AIRY_B = 6356256.909
     private const val F0 = 0.9996012717
@@ -18,46 +27,87 @@ object BritishNationalGrid {
     private const val E0 = 400000.0
     private val PHI0 = Math.toRadians(49.0)
     private val LAMBDA0 = Math.toRadians(-2.0)
+    @Volatile private var gridShifts: FloatBuffer? = null
+
+    fun initialize(assetManager: AssetManager) {
+        if (gridShifts != null) return
+        synchronized(this) {
+            if (gridShifts != null) return
+            val bytes = assetManager.open(GRID_ASSET_NAME).use { it.readBytes() }
+            val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val magic = ByteArray(8)
+            header.get(magic)
+            check(String(magic, Charsets.US_ASCII) == "OSTN15V1") { "Invalid OSTN15 grid asset." }
+            check(header.int == GRID_ROWS && header.int == GRID_COLUMNS) { "Unexpected OSTN15 grid dimensions." }
+            check(
+                header.double == SOUTH_LATITUDE_SECONDS &&
+                    header.double == EAST_LONGITUDE_SECONDS &&
+                    header.double == LATITUDE_INCREMENT_SECONDS &&
+                    header.double == LONGITUDE_INCREMENT_SECONDS,
+            ) { "Unexpected OSTN15 grid definition." }
+            check(bytes.size == GRID_HEADER_BYTES + GRID_ROWS * GRID_COLUMNS * 2 * Float.SIZE_BYTES) {
+                "Incomplete OSTN15 grid asset."
+            }
+            gridShifts = header.slice().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().asReadOnlyBuffer()
+        }
+    }
 
     fun fromWgs84(latitude: Double, longitude: Double): Pair<Double, Double> {
+        require(latitude.isFinite() && longitude.isFinite() && latitude in -90.0..90.0 && longitude in -180.0..180.0) {
+            "Invalid GPS latitude or longitude."
+        }
+        val (latitudeShift, longitudeShift) = interpolateShifts(latitude, longitude)
+        val osgbLatitude = latitude + latitudeShift / 3600.0
+        // NTv2 longitudes are positive west, whereas Android GPS longitudes are positive east.
+        val osgbLongitude = longitude - longitudeShift / 3600.0
+        return projectOsgb36(osgbLatitude, osgbLongitude)
+    }
+
+    private fun interpolateShifts(latitude: Double, longitude: Double): Pair<Double, Double> {
+        val grid = gridShifts ?: throw IllegalStateException("OSTN15 grid data has not been initialized.")
+        val rowPosition = (latitude * 3600.0 - SOUTH_LATITUDE_SECONDS) / LATITUDE_INCREMENT_SECONDS
+        val westLongitudeSeconds = -longitude * 3600.0
+        val columnPosition = (westLongitudeSeconds - EAST_LONGITUDE_SECONDS) / LONGITUDE_INCREMENT_SECONDS
+        require(
+            rowPosition in 0.0..(GRID_ROWS - 1).toDouble() &&
+                columnPosition in 0.0..(GRID_COLUMNS - 1).toDouble(),
+        ) { "The GPS position is outside OSTN15 coverage." }
+
+        val row = floor(rowPosition).toInt().coerceAtMost(GRID_ROWS - 2)
+        val column = floor(columnPosition).toInt().coerceAtMost(GRID_COLUMNS - 2)
+        val rowFraction = rowPosition - row
+        val columnFraction = columnPosition - column
+
+        fun interpolate(component: Int): Double {
+            fun node(nodeRow: Int, nodeColumn: Int): Double =
+                grid.get((nodeRow * GRID_COLUMNS + nodeColumn) * 2 + component).toDouble()
+
+            val southwest = node(row, column)
+            val southeast = node(row, column + 1)
+            val northwest = node(row + 1, column)
+            val northeast = node(row + 1, column + 1)
+            return southwest * (1.0 - rowFraction) * (1.0 - columnFraction) +
+                southeast * (1.0 - rowFraction) * columnFraction +
+                northwest * rowFraction * (1.0 - columnFraction) +
+                northeast * rowFraction * columnFraction
+        }
+
+        return interpolate(0) to interpolate(1)
+    }
+
+    private fun projectOsgb36(latitude: Double, longitude: Double): Pair<Double, Double> {
         val phi = Math.toRadians(latitude)
         val lambda = Math.toRadians(longitude)
-
-        val e2Wgs = 1 - (WGS84_B * WGS84_B) / (WGS84_A * WGS84_A)
-        val nuWgs = WGS84_A / sqrt(1 - e2Wgs * sin(phi).pow(2))
-        val x1 = nuWgs * cos(phi) * cos(lambda)
-        val y1 = nuWgs * cos(phi) * sin(lambda)
-        val z1 = nuWgs * (1 - e2Wgs) * sin(phi)
-
-        val tx = -446.448
-        val ty = 125.157
-        val tz = -542.060
-        val s = 20.4894e-6
-        val rx = Math.toRadians(-0.1502 / 3600)
-        val ry = Math.toRadians(-0.2470 / 3600)
-        val rz = Math.toRadians(-0.8421 / 3600)
-        val x2 = tx + x1 * (1 + s) - y1 * rz + z1 * ry
-        val y2 = ty + x1 * rz + y1 * (1 + s) - z1 * rx
-        val z2 = tz - x1 * ry + y1 * rx + z1 * (1 + s)
-
         val e2 = 1 - (AIRY_B * AIRY_B) / (AIRY_A * AIRY_A)
-        val p = sqrt(x2 * x2 + y2 * y2)
-        var lat = atan2(z2, p * (1 - e2))
-        repeat(10) {
-            val nu = AIRY_A / sqrt(1 - e2 * sin(lat).pow(2))
-            lat = atan2(z2 + e2 * nu * sin(lat), p)
-        }
-        val lon = atan2(y2, x2)
-
         val n = (AIRY_A - AIRY_B) / (AIRY_A + AIRY_B)
-        val sinLat = sin(lat)
-        val cosLat = cos(lat)
+        val sinLat = sin(phi)
+        val cosLat = cos(phi)
         val nu = AIRY_A * F0 / sqrt(1 - e2 * sinLat * sinLat)
         val rho = AIRY_A * F0 * (1 - e2) / (1 - e2 * sinLat * sinLat).pow(1.5)
         val eta2 = nu / rho - 1
 
-        val dPhi = lat - PHI0
-        val sPhi = lat + PHI0
+        val dPhi = phi - PHI0
+        val sPhi = phi + PHI0
         val m = AIRY_B * F0 * (
             (1 + n + 1.25 * n * n + 1.25 * n.pow(3)) * dPhi -
                 (3 * n + 3 * n * n + 2.625 * n.pow(3)) * sin(dPhi) * cos(sPhi) +
@@ -65,7 +115,7 @@ object BritishNationalGrid {
                 (35.0 / 24.0) * n.pow(3) * sin(3 * dPhi) * cos(3 * sPhi)
             )
 
-        val tanLat = tan(lat)
+        val tanLat = tan(phi)
         val i = m + N0
         val ii = nu / 2 * sinLat * cosLat
         val iii = nu / 24 * sinLat * cosLat.pow(3) * (5 - tanLat.pow(2) + 9 * eta2)
@@ -75,9 +125,40 @@ object BritishNationalGrid {
         val vi = nu / 120 * cosLat.pow(5) *
             (5 - 18 * tanLat.pow(2) + tanLat.pow(4) + 14 * eta2 - 58 * tanLat.pow(2) * eta2)
 
-        val dLon = lon - LAMBDA0
+        val dLon = lambda - LAMBDA0
         val northing = i + ii * dLon.pow(2) + iii * dLon.pow(4) + iiia * dLon.pow(6)
         val easting = E0 + iv * dLon + v * dLon.pow(3) + vi * dLon.pow(5)
         return easting to northing
+    }
+
+    fun toGridReference(easting: Double, northing: Double, figures: Int): String {
+        require(figures == 8 || figures == 10) { "Grid reference precision must be 8 or 10 figures." }
+        require(easting.isFinite() && northing.isFinite())
+        val east100k = floor(easting / 100_000.0).toInt()
+        val north100k = floor(northing / 100_000.0).toInt()
+        require(east100k in 0..6 && north100k in 0..12) {
+            "The GPS position is outside the British National Grid."
+        }
+
+        var firstLetter = 19 - north100k - (19 - north100k) % 5 + (east100k + 10) / 5
+        var secondLetter = (19 - north100k) * 5 % 25 + east100k % 5
+        if (firstLetter > 7) firstLetter++
+        if (secondLetter > 7) secondLetter++
+        require(firstLetter in 0..25 && secondLetter in 0..25) {
+            "The GPS position is outside the British National Grid."
+        }
+
+        val figuresPerCoordinate = figures / 2
+        val divisor = 10.0.pow(5 - figuresPerCoordinate).toLong()
+        val eastingDigits = floor(easting).toLong() % 100_000L / divisor
+        val northingDigits = floor(northing).toLong() % 100_000L / divisor
+        return String.format(
+            java.util.Locale.UK,
+            "%c%c%0${figuresPerCoordinate}d%0${figuresPerCoordinate}d",
+            'A' + firstLetter,
+            'A' + secondLetter,
+            eastingDigits,
+            northingDigits,
+        )
     }
 }

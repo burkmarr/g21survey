@@ -1,0 +1,30 @@
+The bundled ostn15-etrs-to-osgb.bin asset contains a compact binary conversion of the
+Ordnance Survey OSTN15_NTv2_ETRStoOSGB grid transformation data.
+
+© Copyright and database rights Ordnance Survey Limited 2016. All rights reserved.
+Licensed under the Open Source Initiative BSD License.
+Official source: https://www.ordnancesurvey.co.uk/documents/resources/OSTN15-NTv2.zip
+Transformation data guide: https://www.ordnancesurvey.co.uk/geodesy-positioning/coordinate-transformations/resources
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of Ordnance Survey Limited nor the names of its contributors
+   may be used to endorse or promote products derived from this data without
+   specific prior written permission.
+
+THIS DATA IS PROVIDED BY ORDNANCE SURVEY LIMITED AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL ORDNANCE SURVEY LIMITED OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS DATA, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

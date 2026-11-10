@@ -1,14 +1,22 @@
 # g21 Survey Android
 
-A native Android starter app that displays the supplied EPSG:27700 raster basemap.
+A native Android starter app that displays an EPSG:27700 raster basemap from the selected project folder.
 
-The basemap JPEGs and their world files are stored in `app/src/main/assets/basemap`.
+Choose a project folder from **Settings**. Place the basemap JPEGs and their matching world files in its `basemap` subfolder.
 
-Use the bottom navigation bar to switch between **Map** and **Tracking**. The map opens at the view you last used (position and zoom), or fitted to the whole basemap on first run. Pan by dragging and zoom with a pinch gesture.
+Use the bottom navigation bar to switch between **Map**, **Tracking**, **Records**, and **Settings**. The map opens at the view you last used (position and zoom), or fitted to the whole basemap on first run. Pan by dragging and zoom with a pinch gesture.
 
-Your current GPS position is always shown as a blue marker, with a shaded circle for GPS accuracy. The map's recenter button flashes red while path tracking is active. The app asks for location permission on first launch, and device location must be on. GPS fixes are converted from WGS84 to EPSG:27700 in `BritishNationalGrid.kt`.
+The **Records** page reads `shortcuts.csv` from the selected project folder. Its header row must include a `code` column; each non-empty code value is shown as a biological recording template button.
 
-On the **Tracking** screen, start or pause GPS path recording and set the **Movement threshold** from 1 to 20 metres (default 5). A point is added to the track only when it is farther than the threshold from the last recorded point; the live position marker still updates for every GPS fix. The summary shows both GPS fixes received and points recorded. Active recording uses the GPS provider at the shortest requested interval and a foreground service so it continues while the app is backgrounded or the screen is locked. Android may ask for notification permission so the ongoing tracking notification is visible. The current track is held in memory and is lost if Android terminates the app process. Starting again with a paused track lets you continue it or replace it. The track is drawn over the map, and its start time, length, elapsed time, and fix/point counts appear at the foot of the Tracking screen. A paused track can be saved as a WGS84 GPX file after choosing a destination with **Choose save folder**; the app asks you to select a folder if none is set. **Clear GPX** clears the in-memory track after confirmation and is only enabled while a track is paused. After saving, the app also offers to clear the track from memory.
+Each time tracking starts, the app creates a `records-<timestamp>.csv` in the project folder with the `code` column removed from the `shortcuts.csv` header. Tapping a template while tracking appends its values, replacing `#date#`, `#time#`, and `#gr#` with the GPS fix date, time, and OS grid reference. In **Settings**, choose 8- or 10-figure grid references (written without spaces), whether recorded times include seconds, and the current location name, which replaces `#site#`. A record can still be added without a location name, but the app warns you. `#comment#` is left blank.
+
+While tracking, template buttons are disabled at a GPS grid reference if a record with that template code and grid reference has already been added to the current records file.
+
+Your current GPS position is always shown as a blue marker, with a shaded circle for GPS accuracy. The map's recenter button flashes red while path tracking is active. The app asks for location permission on first launch, and device location must be on. GPS fixes are converted to EPSG:27700 using the full OSTN15 NTv2 grid transformation in `BritishNationalGrid.kt`; Android WGS84 fixes are treated as ETRS89 input.
+
+The bundled OSTN15 transformation data is licensed under the BSD License. Its required Ordnance Survey copyright notice and licence terms are included in `app/src/main/assets/OSTN15-LICENSE.txt`.
+
+On the **Tracking** screen, start or pause GPS path recording and set the **Movement threshold** from 1 to 20 metres (default 5). A point is added to the track only when it is farther than the threshold from the last recorded point; the live position marker still updates for every GPS fix. The summary shows both GPS fixes received and points recorded. Active recording uses the GPS provider at the shortest requested interval and a foreground service so it continues while the app is backgrounded or the screen is locked. Android may ask for notification permission so the ongoing tracking notification is visible. The current track is held in memory and is lost if Android terminates the app process. Starting again with a paused track lets you continue it or replace it. The track is drawn over the map, and its start time, length, elapsed time, and fix/point counts appear at the foot of the Tracking screen. A paused track can be saved as a WGS84 GPX file; it is written to a `tracks` subfolder of the selected project folder (created if needed). **Clear GPX** clears the in-memory track after confirmation and is only enabled while a track is paused. After saving, the app also offers to clear the track from memory.
 
 ## Development (VS Code only)
 

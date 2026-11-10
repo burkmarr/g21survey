@@ -123,6 +123,11 @@ class TrackingService : Service() {
         }
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        BritishNationalGrid.initialize(assets)
+    }
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -206,6 +211,7 @@ class TrackingService : Service() {
         }
         if (tracking) return
 
+        createNotificationChannel()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         tracking = true

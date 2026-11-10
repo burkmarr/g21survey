@@ -1,0 +1,399 @@
+ 
+ 
+  
+ 
+OSTN15 NTV2 TRANSFORMATION 
+Data Format  and User Guide  
+ 
+ 
+  
+
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 2 of 12 
+OSTN15 NTv2 Transformation 
+Data format and user guide 
+Contents 
+Section 
+ 
+Preface  .......................................... ............................................................................................ 3 
+Contact details ...................................................................................... ................................................. 3  
+Use of the transformation model ...................................................................... .................................... 3  
+Disclaimer ........................................ ................................................... ...................................................  3 
+Copyright in this guide .............................................................................. ............................................. 4  
+Data copyright and other intellectual property rights ................................................ ......................... 4 
+Trademarks ........................................................................................... ................................................. 4  
+Using this guide .................................. ................................................... ................................................ 4  
+Chapter 1  Introduction ...................................... ............................................................................. 5 
+OSTN15 NTv2 format ................................ ................................................... .......................................... 5  
+ETRS89 explained .................................. ................................................... ............................................. 5  
+Benefits .......................................... ................................................... ................................................... .. 6 
+Applications ...................................... ................................................... .................................................. 6 
+Software for OSTN15 ............................... ................................................... ........................................... 6  
+Chapter 2  NTv2 Data Format ........................................................................................................... 7 
+Basic principles ..................................................................................... ................................................. 7  
+Data structure .................................... ................................................... ................................................. 7  
+Chapter 3  Using OSTN15 NTv2 ......................................................................................................... 9 
+Chapter 4  Quality statement ..........................................................................................................10  
+Coverage .......................................... ................................................... ................................................. 1 0  
+Accuracy of OSTN15 ................................................................................... .......................................... 10  
+Annexe A  Glossary ........................................................................................................................11  
+ 
+[v.1.0] � October 2016 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 3 of 12 
+Preface 
+This guide is designed to provide an overview of the NTv2 format version of the Ordnance Survey grid 
+transformation in Great Britain OSTN15�. It is a guide to help users understand the format of the transformation 
+data file only. Since the implementation of the NTv2 will most likely involve the binary version of th e data file in a 
+GIS system the interpolation method and formulae are not covered. This guide assumes that users have a n 
+understanding of coordinate systems and datums. If you find an error or omission in this user guide, or otherwise 
+wish to make a comment or suggestion as to how we can improve the user guide, please contact us at the address 
+shown below under contact details. 
+We reserve the right to change the information in this user guide at any time without notice. 
+ 
+Contact details 
+For users requiring help and information, our Customer Service Centre will be pleased to deal with your enquiries: 
+Customer Service Centre 
+Ordnance Survey 
+Adanac Drive 
+Southampton 
+SO16 0AS 
+General enquiries: +44 (0)3456 050505 
+Welsh language helpline: 03456 050504 
+Textphone: +44 (0)2380 056146 
+customerservices@os.uk 
+ 
+www.os.uk 
+ 
+This document has been screened in accordance with the requirements set out in Ordnance Survey's  
+Equality scheme . If you have difficulty reading this information in its current format and would like to find out how 
+to access it in a different format (Braille, large print, computer disk or in another language), pleas e contact us on: 
++44 (0)3456 050505. 
+Use of the transformation model 
+Within Great Britain coordinates are transformed using the Ordnance Survey National Grid Transformation model 
+(OSTN15). 
+The OSTN15 transformation model (in �native� and NTv2 formats) has been created by Ordnance Survey Gre at 
+Britain who are the organisation responsible for the official, definitive topographic mapping of the country. 
+The transformation in any format is licensed to users pursuant to the terms of the Open Source Initiat ive BSD 
+Licence (see http://opensource.org/licenses/bsd-license.php). 
+If the transformation is incorporated into other software, the copyright notice must be attached to the software 
+under the terms of the BSD licence is as follows:  
+'� Copyright and database rights Ordnance Survey Limited 2016. All rights reserved.� 
+Disclaimer 
+This user guide is provided for guidance only and it does not constitute any warranty, representation,  undertaking, 
+commitment or obligation (express or implied) about the grid transformation models or their suitability for any 
+particular or intended purpose. It is your responsibility to ensure that the models are suitable for your intended 
+purpose. We do not accept responsibility for the content of any third party websites referenced or acc essed in or 
+through this user guide, on the Ordnance Survey website and/or in any other documentation. 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 4 of 12 
+The OSTN15 transformation models are provided �as is� and any express or implied warranties, including , but not 
+limited to, the implied warranties of merchantability and fitness for a particular purpose are disclaimed.  
+In no event shall Ordnance Survey Limited Great Britain be liable for any direct, indirect, incidental, special, 
+exemplary or consequential damages (including, but not limited to procurement of substitute goods or services, 
+loss of use, data or profits, or business interruption) however, caused and on any theory of liability, whether in 
+contract, strict liability, or tort (including negligence or otherwise) arising in any way out of the use of the OSTN15 
+transformation models, and/or this user guide, even if advised of the possibility of such damage.  
+Copyright in this guide 
+This user guide has been created by Ordnance Survey Limited, Great Britain�s mapping agency and is � Ordnance 
+Survey Limited 2016. All rights reserved.  
+Any part of this guide may be copied for use internally in your organisation or business so that you can use the 
+product for the purpose for which it is licensed to your organisation or business (but not otherwise).   
+No part of this guide may be reproduced or transmitted in any form or by any means (including electronically) for 
+commercial exploitation without the prior written consent of Ordnance Survey Limited.  
+No part of this guide may be copied or incorporated in products, services or publications that you generate for 
+onward sale, or as free promotional or support materials, without the prior written consent of Ordnanc e Survey 
+Limited.  
+Data copyright and other intellectual property rights 
+The copyright and database rights in OSTN15 data is owned by Ordnance Survey Limited.  
+Trademarks 
+Ordnance Survey, the OS logos and OSGB36 are registered trademarks and OSTN15 is a trademark of Ordnance 
+Survey, Britain�s mapping agency. 
+Adobe and Reader are registered trademarks of Adobe Systems Incorporated. 
+Linux is a registered trademark of MSX Licensing Corporation. 
+OSX is a registered trademark of Apple Inc. 
+Windows is a registered trademark of Microsoft Corporation. 
+Using this guide 
+The documentation is supplied in portable document format (PDF) only. Free Adobe � Reader � software, which 
+displays the specification, incorporates search and zoom facilities and allows you to navigate within.  Hyperlinks are 
+used to navigate between associated parts of the specification and to relevant internet resources by clicking on the 
+blue hyperlinks and the table of contents. 
+ 
+ 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 5 of 12 
+Chapter 1  Introduction 
+All Ordnance Survey mapping relates to a coordinate reference system known as OSGB36� (the �National Grid� � 
+EPSG code 27700). This reference system was traditionally realised on the Earth�s surface by monumente d 
+triangulation stations. The users of mapping products, in both the public and private sectors, have invested in 
+geographical information systems (GIS) and asset management systems based on OSGB36 which has been 
+accepted as de facto national standard. 
+The National Grid is capable of supporting surveying and mapping in GB to meet all the requirements of  users both 
+now and in the future; however, an increasing number of spatial datasets are available in GNSS (Global Navigation 
+Satellite System, e.g. GPS) compatible coordinate systems, such as ETRS89 (EPSG code 4258). When two or more 
+coordinate datasets are to be integrated, it is essential that each relates to the same coordinate reference system, 
+irrespective of accuracy issues. 
+In order to relate GNSS-derived positions to Ordnance Survey�s mapping, GNSS coordinates need to be 
+transformed to National Grid via a specialised datum transformation. For this reason Ordnance Survey h as 
+developed OSTN15, the standard datum transformation for Great Britain. OSTN15 replaces the previous model 
+OSTN02�. 
+In its �native� form OSTN15 consists of a 700km by 1,250km square grid of translation vectors at 1km resolution. 
+This provides a fit between the GNSS coordinate system European Terrestrial Reference System 1989 (ETR S89) and 
+the OSGB36 National Grid. OSTN15 is in agreement with major triangulation stations at the level of 0.1m root mean 
+square error (RMSE). 
+OSTN15 has been developed from the national primary, secondary and tertiary triangulation station netw ork. It 
+contains over 3,200 points directly observed by GNSS and more than 1,000 from the original retriangulation 
+observations adjusted on the ETRS89 datum. 
+OSTN15, in conjunction with the ETRS89 positions of the OS Net� permanent GNSS stations, is now the of ficial 
+definition of OSGB36 National Grid coordinate system. This means that using OSTN15 with the OS Net Net work, 
+surveyors using GNSS have no need to occupy triangulation stations in order to relate GNSS coordinates  to 
+National Grid coordinates. 
+OSTN15 NTv2 format 
+The format in which OSTN15 is originally derived, from the raw data set of observed triangulation poin ts, is a 
+regular 1km square grid of parameters, 700km wide and 1250km high covering the whole of GB. Transforma tion 
+parameters at a particular point are computed via bi-linear interpolation from the parameters at the corners of the 
+km square within which the point falls. The file format of OSTN15 is a simple comma delimited text file with each 
+line containing the parameters of a single km square intersection along the coordinates of that intersection. 
+NTv2 transformation format is popular with GIS systems and follows a similar principle using a grid of  parameters 
+and bi-linear interpolation. The main difference from native OSTN15 format is that NTv2 is a latitude/longitude 
+graticule instead of a km square grid. The file format for OSTN15 NTv2 is more prescribed than for native OSTN15. 
+There is a text file (extension .asc ) with a header block that gives basic information about the transformation and 
+then the parameters are given in a fixed character width, space delimited, column format with one line  for each 
+graticule intersection giving just the shifts and their estimated error values. The other difference from native 
+OSTN15 is that the NTv2 version is offered in two versions � one with native direction ETRS89 to OSGB3 6 (the same 
+as native OSTN15) and another where the native direction is reversed to be OSGB36 to ETRS89.  The tran sformation 
+(in both formats) is fully reversible. NTv2 also has a binary companion to the . asc  file with the extension . gsb . It is 
+the gsb  file that is most commonly used in GIS systems. 
+ETRS89 explained 
+OSTN15 links the OSGB36 National Grid coordinate reference system to the GNSS-compatible coordinate sy stem 
+ETRS89. In Europe, ETRS89 is a precise version of the better known WGS84 (EPSG code 4326) coordinate r eference 
+system optimised for use in Europe; however, for most purposes it can be considered equivalent to WGS8 4. 
+Specifically, the motion of the European continental plate is not apparent in ETRS89, which allows a fixed 
+relationship to be established between this system and Ordnance Survey mapping coordinate systems. 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 6 of 12 
+Additional precise versions of WGS84 are also currently in use, notably ITRS (International Terrestrial Reference 
+System); these are not equivalent to ETRS89. The difference between ITRS/WGS84 and ETRS89 was zero in 1989 and 
+is growing by approximately 0.025 m per year in UK and Ireland (so is ~0.67m in 2016). This effect is only relevant in 
+international scientific applications. For all navigation, mapping, GIS, and engineering applications within the 
+tectonically stable parts of Europe (including UK and Ireland), the term ETRS89 should be taken as synonymous 
+with WGS84. 
+Benefits 
+OSTN15 provides the solution to relating GNSS (WGS84) datasets to Ordnance Survey mapping. Used with the 
+OS Net GNSS network, it allows GNSS surveying withi n the National Grid without the need to visit any Ordnance 
+Survey traditional control points. 
+Applications 
+The OSTN15 is of interest to: 
+� GNSS surveyors who need to relate their survey to  the National Grid � used with OS Net, it removes the 
+need to visit traditional Ordnance Survey horizontal and vertical control points; and 
+� GIS, GPS, CAD and navigation system developers wh o need to integrate GNSS (WGS84) datasets with 
+Ordnance Survey mapping � these products provide the complete solution to these users at all Ordnance 
+Survey mapping scales. 
+Software for OSTN15 
+This guide specifically deals with the OSTN15 NTv2 data format which is designed for incorporation int o GIS 
+Systems. However, the transformation (and its companion height model OSGM15) have been coded into a software 
+application � �Grid InQuest II�.  The software allows for individual coordinate input and output via a GUI and also 
+batch input/output via text files.  A command line interface and dll, along with examples of their use in a variety of 
+programming languages, are also included. Users wishing to incorporate the pre-prepared .dll into other 
+applications should refer to the Grid InQuest II user guide. 
+Grid InQuest II download packages for Windows� (32 bit and 64 bit), Linux� (32 bit and 64 bit) and OSX� are 
+available from the Ordnance Survey web site http://www.ordnancesurvey.co.uk/business-and-government/help-and-
+support/navigation-technology/os-net/grid-inquest.html . The packages and software source code are also av ailable 
+at https://bitbucket.org/PaulFMichell/gridinquestii  
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 7 of 12 
+Chapter 2  NTv2 Data Format 
+Basic principles 
+Specifications of OSTN15 horizontal transformation, NTv2 format 
+Transformation: horizontal datum transformation bet ween OSGB36 and ETRS89. Native direction of 
+parameters is indicated by the data file name , i.e. �OSTN15_NTv2_OSGBtoETRS� or 
+�OSTN15_NTv2_ETRStoOSGB� but transformation is reve rsible. 
+Transformation type: Interpolation from graticule o f latitude and longitude shifts (in seconds). 
+Estimation method: Bi-linear interpolation from nat ive OSTN15 1km grid. 
+Graticule resolution: 30� in latitude, 60� in longi tude. 
+Grid interpolation: Bi-linear. 
+Accuracy: 0.1m (RMS) with respect to OSGB36 primary , secondary and tertiary triangulation 
+monuments and 0.001m with respect to native 1km gri d version of OSTN15. 
+Extent:   SW corner N49 �, W9 �; NE corner N61 �, E2 �.  12 � North-South, 11 � East-West. 
+Data structure 
+The data structure of the . asc  file of OSTN15 NTv2 is shown below, however most practical applications of 
+OSTN15 NTv2 will involve importing the binary . gsb  file . Usually when using the . gsb  file no knowledge of the 
+data structure is required and it is normally sufficient to just state the native �from� and �to� coordinate systems of 
+the transformation. 
+For OSTN15 NTv2 the native �from� system and the �to� system are indicated by the .asc  or .gsb  filename. I.e.  
+OSTN15_NTv2_OSGBtoETRS.asc  or OSTN15_NTv2_ETRStoOSGB.asc . The example data structure shown here is of 
+native direction OSGB36 to ETRS89. 
+The data file starts with a header block: 
+Header element  Description  Value   
+NUM_OREC 11 No. records in overview header  11  1.  Start of overview 
+header 
+NUM_SREC 11 No. records in sub grid(s) header  11  2.   
+NUM_FILE  1 No. sub grids  1 3.   
+GS_TYPE SECONDS  Shift type  SECONDS  4.   
+VERSION OSTN15   Model name  OSTN15  5.   
+SYSTEM_FAIRY1830 �From� ellipsoid  AIRY1830  6.   
+SYSTEM_TGRS80 �To� ellipsoid  GRS80  7.   
+MAJOR_F  6377563.396 �From� ellipsoid semi major axis (m)  6377563.396  8.   
+MINOR_F  6356256.909 �From� ellipsoid semi minor axis (m)  6356256.909  9.   
+MAJOR_T  6378137.000 �To� ellipsoid semi major axis (m)  6378137.000  10.   
+MINOR_T  6356752.314 �To� ellipsoid semi minor axis (m)  6356752.314  11.  End of overview header  
+SUB_NAMEGB+IOM   Sub grid name  GB+IOM  1.  Start of sub grid header  
+PARENT  NONE     Parent grid name  NONE  2.   
+CREATED 20161003 Creation date (YYYYMMDD)  20161003  3.   
+UPDATED 20161003 Updated date (YYYYMMDD)  20161003  4.   
+S_LAT     176400.000000 Lower latitude  (seconds)  176400 (N49 �) 5.   
+N_LAT     219600.000000 Upper latitude (seconds)  219600 (N61 �) 6.   
+E_LONG     -7200.000000 Lower longitude (seconds, W +ve)  -7200 (E2 �) 7.   
+W_LONG     32400.000000 Upper longitude (seconds, W +ve)  32400 (W9 �) 8.   
+LAT_INC30.000000Latitudeinterval(seconds)309.
+LONG_INC      60.000000 Longitude interval (seconds)  60  10.   
+GS_COUNT952501 No. grid nodes  952501  11.  End of sub grid header  
+ 
+The header is then immediately followed by the rows of data. Each row contains the offsets for a single graticule 
+intersection or �node�. The node order in the file is indicated in Figure 1 below. 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 8 of 12 
+ 
+Figure 1. Diagram of NTv2 file grid node order (from https://www.dnrm.qld.gov.au/__data/assets/pdf_file/0006/105765/gday-21-
+user-guide.pdf). 
+ 
+So, the order for OSTN15 NTv2 format is as follows: 
+ 
+Figure 2. Nodes of the OSTN15 NTv2 data. 
+The data rows look like this: 
+  2.998631  6.259749  0.000030  0.000030 
+  2.997586  6.253345  0.000030  0.000030 
+  2.996542  6.246941  0.000030  0.000030 
+  2.995498  6.240536  0.000030  0.000030 
+. 
+. 
+. 
+ 
+Each row is a latitude shift value (seconds) and longitude shift value (seconds) followed by accuracy indicators in 
+the same order (latitude then longitude). 
+The binary .gsb  files for OSTN15 NTv2 were generated from the .asc  files using the �GDAy 2.1� software available 
+from this web page: 
+https://www.business.qld.gov.au/industry/titles-pro perty-construction/surveying/gda-transformation-sof tware  
+
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 9 of 12 
+Chapter 3  Using OSTN15 NTv2 
+The use of OSTN15 NTv2 will most likely involve introducing the binary .gsb  file into a GIS system. So, the formula 
+and algorithms for interpreting the NTv2 .asc  file are not give here. Users interested in the formula and algorithms 
+for bilinear interpolation of transformation parameters from a gridded file should see the user guide for native 
+OSTN15 - �Transformations_and_OSGM15_User_Guide� wh ich is available in the 
+OSTN15-OSGM15_Developers_Pack.zip  from the Ordnance Survey web site. 
+Specific instructions for installing the OSTN15 NTv2 transformation in different GIS systems are beyond the scope 
+of this document and users are advised to contact their GIS system vendor for details. However the process of using 
+OSTN15 NTv2 .gsb  file in a GIS will usually involve specifying the �from� and �to� coordinate systems. For the 
+OSTN15 NTv2 .gsb  files the �from� system and the �to� system are indicated by the filename. I.e. 
+OSTN15_NTv2_OSGBtoETRS.gsb  or OSTN15_NTv2_ETRStoOSGB.gsb . 
+The coordinate system and ellipsoid information that may be required by some GIS systems are given in Table 1 
+below. 
+ 
+Table 1. Coordinate system information for OSTN15 NTv2 
+Coordinate system, EPSG code Ellipsoid Semi-major 
+axis a (m) 
+Semi-minor 
+axis b (m) 
+OSGB36 (2D lat/long), EPSG::4277 or 
+OSGB36 National Grid, EPSG::27700 
+Airy 1830 6 377 563.396 6 356 256.909 
+ETRS89, EPSG::4258 (or WGS84, EPSG::4326) GRS80 1 6 378 137.000 6 356 752.3141 
+ 
+The OSTN15_NTv2.zip  package available from the Ordnance Survey web site contains the the .asc  and .gsb  data files 
+along with test input and test output files to allow for testing of the implementation of OSTN15 NTv2 in GIS 
+systems. Sample test inputs and outputs are given i n Table 2 and Table 3 below. NB the exact answers below may 
+not be produced due to differences between GIS systems in data handling and interpretation of the transformation 
+algorithm.  However results should be with a cm or so. 
+ 
+Table 2. Example OSGB36 to ETRS89 transformation 
+OSGB36 National Grid, EPSG::27700 INPUT (m) ETRS89,  EPSG::4258 OUTPUT (Decimal Degrees) 
+422242.186, 433818.701 53.80021519630,-1.66379168242 
+ 
+ 
+Table 3. Example ETRS89 to OSGB36 transformation. 
+ETRS89, EPSG::4258 INPUT (Decimal Degrees) OSGB36 N ational Grid, EPSG::27700 OUTPUT (m) 
+51.40078220140, -3.55128349240 292184.870, 168003.465 
+ 
+ 
+
+1 Also known as the WGS84 ellipsoid  
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 10 of 12 
+Chapter 4  Quality statement 
+Coverage 
+OSTN15 covers Great Britain and the Isle of Man. 
+Accuracy of OSTN15 
+Within Great Britain, OSTN15 is the definitive OSGB36/ETRS89 transformation. OSTN15 in combination with the 
+ETRS89 coordinates of the OS Net GNSS network stations, rather than the fixed triangulation network, n ow define 
+the National Grid. This means that, for example, the National Grid coordinates of an existing OSGB36 point, refixed 
+using GNSS from OS Net and OSTN15, will be the correct ones. The original archived OSGB36 National Gri d 
+coordinates of the point (if different) will no longer be true OSGB36, by definition, but the two coor dinates (new and 
+archived) will agree on average to better than 0.1 m, (68% probability). 
+In NTv2 format the above accuracy statement also applies with the further statement that the NTv2 vers ion of 
+OSTN15 agrees with the native 1km grid version of OSTN15 at the 0.001m level (i.e. the difference between native 
+OSTN15 and OSTN15 NTv2 is negligible). 
+ 
+ 
+ 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 11 of 12 
+Annexe A  Glossary 
+The following is a list of technical terms that maybe found in this user guide, together with a fuller definition. 
+datum 
+A point, line, surface or set of these, with respect to which positions of objects can be stated as unique sets of 
+coordinates. 
+de facto national standard 
+A national standard by adoption rather than legally enforced. 
+ellipsoid (biaxial) 
+The 3D geometric figure obtained by rotating an ellipse about its minor axis. Used in geodesy to approximate the 
+shape of the earth. 
+ETRF89 
+European Terrestrial Reference Frame 1989 � the Eur ope-fixed realisation of WGS84. Governed by EUREF as a 
+standard reference frame for Europe. 
+ETRS89 
+European Terrestrial Reference System 1989 � a coordinate system that is the Europe-fixed precise version of 
+WGS84. Governed by EUREF as the standard fixed reference system for Europe. ETRS89 is related to the state-of-
+the-art WGS84-consistent system ITRS2000 by a six-parameter kinematic transformation published by IERS. 
+EUREF 
+EUREF (European Reference Frame): a sub-commission of the International Association of Geodesy, Commission X. 
+geocentric datum 
+A reference system that uses the centre of mass of the earth as its origin; the popularity of these systems today 
+derives from their usefulness in describing satellite orbits. 
+Geoid model 
+A model of the level surface which is closest to mean sea level over the oceans. This surface is continued under land 
+as the fundamental reference surface for height measurement. 
+GNSS 
+Global Navigation Satellite System � generic term for one or more satellite navigation systems includi ng (but not 
+limited to) GPS (USA), GLONASS (Russia), Galileo (Europe), Beidou (China). 
+GPS 
+Global Positioning System � an outdoor positioning technique using a constellation of US Department of  Defense 
+satellites and a portable receiver to dynamically determine coordinates. For high precision, several r eceivers are 
+used and their relative positions are determined. 
+GRS80 
+A global reference ellipsoid used in the WGS84 coordinate system. Also known as the WGS84 ellipsoid. 
+IERS  
+International Earth Rotation Service. 
+ITRF 
+International Terrestrial Reference Frame � the state-of-the-art global realisation of the WGS84 refer ence system, 
+using observations from worldwide networks of active geodetic stations of the VLBI, SLR, GPS and DORIS 
+techniques. 
+ODN 
+Ordnance Datum Newlyn � the levelling-based vertica l reference frame for most of the British Isles, with a single 
+tide gauge constraint in Newlyn in Cornwall. 
+ 
+OSTN15 NTv2 Transformation data format and user guide  [v.1.0] � October 2016      � Ordnance Survey Limited 2016 Page 12 of 12 
+OSGB36 
+Ordnance Survey Great Britain 1936 � the British horizontal mapping datum, observed by triangulation f rom 1936 
+and traditionally realised on the ground by triangulation stations. With the release of the definitive transformation, 
+OSTN02, OSGB36 is now realised by the ETRS89 coordi nates of the National GPS Network in conjunction with the 
+OSTN02 transformation. 
+OSGM02 
+Ordnance Survey National Geoid Model 2002 � now superceded, a gravimetric Geoid model that is aligned with the 
+national height datums of Great Britain, Northern Ireland and Ireland. Replaced by OSGM15. 
+OSGM15 
+Ordnance Survey National Geoid Model 2015 � a gravimetric Geoid model that is aligned with the nationa l height 
+datums of Great Britain, Northern Ireland and Ireland. 
+OSTN15 
+Ordnance Survey National Grid Transformation 2015 � a grid shift type horizontal transformation betwee n the 
+ETRS89 datum and OSGB36 National Grid. 
+realisation 
+A spatial reference system made real on the ground by monumented points with estimated coordinates and  errors. 
+transformation 
+A procedure to change from one coordinate system to another. 
+WGS84 
+World Geodetic System 1984 � the global geodetic reference system used to describe the position of GPS satellites 
+and ground stations. 
+ 
+

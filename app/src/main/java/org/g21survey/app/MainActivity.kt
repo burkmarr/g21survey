@@ -4,6 +4,7 @@ import android.animation.ValueAnimator
 import android.Manifest
 import android.app.AlertDialog
 import android.app.Activity
+import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ComponentName
@@ -17,14 +18,26 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Path
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.DocumentsContract
+import android.text.Editable
+import android.text.InputType
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextWatcher
+import android.text.style.StyleSpan
 import android.text.format.DateUtils
+import android.util.Base64
 import android.widget.Toast
 import android.view.Gravity
 import android.view.MotionEvent
@@ -32,8 +45,13 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.NumberPicker
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.TextView
 import java.text.DateFormat
 import java.text.SimpleDateFormat
@@ -53,6 +71,14 @@ private data class RasterTile(
 )
 
 private data class GpxSaveResult(val folder: String, val filename: String)
+private data class ShortcutTemplate(val code: String, val fields: List<String>)
+private data class RecordCodeGrid(val code: String, val gridReference: String)
+private data class ShortcutData(
+    val headers: List<String>,
+    val codeColumnIndex: Int,
+    val templates: List<ShortcutTemplate>,
+)
+private data class ShortcutLoadResult(val data: ShortcutData?, val message: String)
 
 class MainActivity : Activity() {
     private val loader = Executors.newSingleThreadExecutor()
@@ -60,22 +86,32 @@ class MainActivity : Activity() {
     private lateinit var mapView: RasterMapView
     private lateinit var screenTitle: TextView
     private lateinit var trackingScreen: View
+    private lateinit var settingsScreen: View
+    private lateinit var recordsScreen: View
     private lateinit var trackingButton: Button
     private lateinit var trackingSaveButton: Button
     private lateinit var trackingClearButton: Button
-    private lateinit var trackingFolderButton: Button
-    private lateinit var trackingFolderLabel: TextView
+    private lateinit var projectFolderButton: Button
+    private lateinit var projectFolderLabel: TextView
     private lateinit var trackingStatus: TextView
     private lateinit var trackingSummary: TextView
     private lateinit var movementThresholdPicker: NumberPicker
     private lateinit var mapNavigationItem: NavigationItem
     private lateinit var trackingNavigationItem: NavigationItem
+    private lateinit var settingsNavigationItem: NavigationItem
+    private lateinit var recordsNavigationItem: NavigationItem
+    private lateinit var recordsStatus: TextView
+    private lateinit var recordsButtons: LinearLayout
+    private val recordTemplateButtons = mutableListOf<Pair<ShortcutTemplate, Button>>()
+    private val recordedCodeGrids = mutableSetOf<RecordCodeGrid>()
+    private val pendingCodeGrids = mutableSetOf<RecordCodeGrid>()
     private var listening = false
     private var trackingService: TrackingService? = null
     private var serviceBound = false
     private var pendingTrackStart = false
     private var activityResumed = false
     private var isSavingTrack = false
+    private var isPreparingRecordsFile = false
 
     private val trackingObserver = object : TrackingService.Observer {
         override fun onTrackChanged(
@@ -96,6 +132,7 @@ class MainActivity : Activity() {
                             currentPosition.northing,
                             currentPosition.accuracyMeters,
                         )
+                        updateRecordButtons(currentPosition)
                     }
                     if (snapshot?.isTracking == true) {
                         stopLocationUpdates()
@@ -120,6 +157,7 @@ class MainActivity : Activity() {
             mapView.setTrack(points)
             (service.latestPosition() ?: points.lastOrNull())?.let {
                 mapView.setPosition(it.easting, it.northing, it.accuracyMeters)
+                updateRecordButtons(it)
             }
             if (snapshot?.isTracking == true) stopLocationUpdates()
         }
@@ -146,6 +184,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        BritishNationalGrid.initialize(assets)
         window.statusBarColor = Color.WHITE
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
 
@@ -193,6 +232,24 @@ class MainActivity : Activity() {
             ),
         )
         trackingScreen.visibility = View.GONE
+        settingsScreen = createSettingsScreen()
+        content.addView(
+            settingsScreen,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        settingsScreen.visibility = View.GONE
+        recordsScreen = createRecordsScreen()
+        content.addView(
+            recordsScreen,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        recordsScreen.visibility = View.GONE
 
         root.addView(heading)
         root.addView(
@@ -212,10 +269,16 @@ class MainActivity : Activity() {
         }
         mapNavigationItem = NavigationItem(this, "Map", tracking = false)
         trackingNavigationItem = NavigationItem(this, "Tracking", tracking = true)
+        settingsNavigationItem = NavigationItem(this, "Settings", tracking = false, settings = true)
+        recordsNavigationItem = NavigationItem(this, "Records", tracking = false, records = true)
         mapNavigationItem.setItemSelected(true)
         trackingNavigationItem.setItemSelected(false)
+        settingsNavigationItem.setItemSelected(false)
+        recordsNavigationItem.setItemSelected(false)
         mapNavigationItem.setOnClickListener { showScreen(Screen.MAP) }
         trackingNavigationItem.setOnClickListener { showScreen(Screen.TRACKING) }
+        settingsNavigationItem.setOnClickListener { showScreen(Screen.SETTINGS) }
+        recordsNavigationItem.setOnClickListener { showScreen(Screen.RECORDS) }
         navigation.addView(
             mapNavigationItem,
             LinearLayout.LayoutParams(0, dp(64), 1f),
@@ -224,11 +287,21 @@ class MainActivity : Activity() {
             trackingNavigationItem,
             LinearLayout.LayoutParams(0, dp(64), 1f),
         )
+        navigation.addView(
+            settingsNavigationItem,
+            LinearLayout.LayoutParams(0, dp(64), 1f),
+        )
+        navigation.addView(
+            recordsNavigationItem,
+            LinearLayout.LayoutParams(0, dp(64), 1f),
+        )
         root.addView(navigation)
 
         setContentView(root)
+        restoreRecordCodeGrids()
         mapView.restoreView(readSavedView())
         loadBasemap()
+        loadShortcuts()
 
         if (!hasLocationPermission()) {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), LOCATION_REQUEST)
@@ -237,12 +310,23 @@ class MainActivity : Activity() {
 
     private fun showScreen(screen: Screen) {
         val isMap = screen == Screen.MAP
-        screenTitle.text = if (isMap) "g21 Survey" else "Tracking"
+        val isTracking = screen == Screen.TRACKING
+        val isSettings = screen == Screen.SETTINGS
+        screenTitle.text = when (screen) {
+            Screen.MAP -> "g21 Survey"
+            Screen.TRACKING -> "Tracking"
+            Screen.SETTINGS -> "Settings"
+            Screen.RECORDS -> "Records"
+        }
         mapView.visibility = if (isMap) View.VISIBLE else View.GONE
         mapView.setTrackingFlashVisible(isMap && activityResumed)
-        trackingScreen.visibility = if (isMap) View.GONE else View.VISIBLE
+        trackingScreen.visibility = if (isTracking) View.VISIBLE else View.GONE
+        settingsScreen.visibility = if (isSettings) View.VISIBLE else View.GONE
+        recordsScreen.visibility = if (screen == Screen.RECORDS) View.VISIBLE else View.GONE
         mapNavigationItem.setItemSelected(isMap)
-        trackingNavigationItem.setItemSelected(!isMap)
+        trackingNavigationItem.setItemSelected(isTracking)
+        settingsNavigationItem.setItemSelected(isSettings)
+        recordsNavigationItem.setItemSelected(screen == Screen.RECORDS)
     }
 
     private fun createTrackingScreen(): View {
@@ -288,16 +372,6 @@ class MainActivity : Activity() {
             text = "Clear GPX"
             isEnabled = false
             setOnClickListener { onClearTrackClicked() }
-        }
-        trackingFolderButton = Button(this).apply {
-            text = "Choose save folder"
-            setOnClickListener { chooseGpxFolder() }
-        }
-        trackingFolderLabel = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(100, 110, 103))
-            gravity = Gravity.CENTER
-            maxLines = 2
         }
         controls.addView(
             trackingStatus,
@@ -347,21 +421,6 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) },
         )
-        controls.addView(
-            trackingFolderButton,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) },
-        )
-        controls.addView(
-            trackingFolderLabel,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(4) },
-        )
-        updateGpxFolderLabel()
         screen.addView(controls)
         screen.addView(
             View(this),
@@ -388,6 +447,150 @@ class MainActivity : Activity() {
         footer.addView(trackingSummary)
         screen.addView(footer)
         return screen
+    }
+
+    private fun createSettingsScreen(): View {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(20), dp(24), dp(20), dp(12))
+        }
+        screen.addView(TextView(this).apply {
+            text = "Grid reference precision"
+            textSize = 16f
+            setTextColor(Color.rgb(55, 65, 58))
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        val tenFigureOption = RadioButton(this).apply {
+            id = View.generateViewId()
+            text = "10 fig"
+        }
+        val eightFigureOption = RadioButton(this).apply {
+            id = View.generateViewId()
+            text = "8 fig"
+        }
+        val precisionOptions = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            addView(tenFigureOption)
+            addView(eightFigureOption)
+            check(
+                if (prefs.getInt(KEY_GRID_REFERENCE_PRECISION, DEFAULT_GRID_REFERENCE_PRECISION) == 8) {
+                    eightFigureOption.id
+                } else {
+                    tenFigureOption.id
+                },
+            )
+            setOnCheckedChangeListener { _, checkedId ->
+                val precision = if (checkedId == eightFigureOption.id) 8 else 10
+                prefs.edit().putInt(KEY_GRID_REFERENCE_PRECISION, precision).apply()
+            }
+        }
+        screen.addView(
+            precisionOptions,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) },
+        )
+        val recordSecondsOption = CheckBox(this).apply {
+            text = "Record seconds with time"
+            isChecked = prefs.getBoolean(KEY_RECORD_TIME_SECONDS, DEFAULT_RECORD_TIME_SECONDS)
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean(KEY_RECORD_TIME_SECONDS, checked).apply()
+            }
+        }
+        screen.addView(
+            recordSecondsOption,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) },
+        )
+        screen.addView(TextView(this).apply {
+            text = "Current location name"
+            textSize = 16f
+            setTextColor(Color.rgb(55, 65, 58))
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        screen.addView(
+            EditText(this).apply {
+                hint = "Enter location name"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+                setSingleLine(true)
+                setText(prefs.getString(KEY_CURRENT_LOCATION_NAME, ""))
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) {
+                        prefs.edit().putString(KEY_CURRENT_LOCATION_NAME, s?.toString().orEmpty()).apply()
+                    }
+                })
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) },
+        )
+        projectFolderButton = Button(this).apply {
+            text = "Choose project folder"
+            setOnClickListener { chooseGpxFolder() }
+        }
+        projectFolderLabel = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(100, 110, 103))
+            gravity = Gravity.CENTER
+            maxLines = 2
+        }
+        screen.addView(projectFolderButton)
+        screen.addView(
+            projectFolderLabel,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(4) },
+        )
+        updateGpxFolderLabel()
+        return screen
+    }
+
+    private fun createRecordsScreen(): View {
+        recordsStatus = TextView(this).apply {
+            text = "Select a project folder in Settings to load recording templates."
+            textSize = 14f
+            setTextColor(Color.rgb(80, 88, 82))
+            gravity = Gravity.CENTER
+        }
+        recordsButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(24), dp(20), dp(12))
+            addView(
+                recordsStatus,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                recordsButtons,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(8) },
+            )
+        }
+        return ScrollView(this).apply {
+            isFillViewport = true
+            addView(content)
+        }
     }
 
     private fun onTrackingButtonClicked() {
@@ -441,6 +644,52 @@ class MainActivity : Activity() {
     }
 
     private fun requestTrackingService(action: String) {
+        if (isPreparingRecordsFile) return
+        isPreparingRecordsFile = true
+        updateTrackingUi(trackingService?.snapshot())
+        saver.execute {
+            try {
+                val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val projectFolder = prefs.getString(KEY_GPX_FOLDER_URI, null)
+                    ?: throw IOException("Choose a project folder in Settings before starting tracking.")
+                val shortcutResult = readShortcutTemplates()
+                val shortcuts = shortcutResult.data
+                    ?: throw IOException(shortcutResult.message)
+                val recordsUri = createRecordsFile(Uri.parse(projectFolder), shortcuts)
+                val saved = prefs.edit()
+                    .putString(KEY_ACTIVE_RECORDS_URI, recordsUri.toString())
+                    .putString(KEY_ACTIVE_RECORDS_PROJECT_URI, projectFolder)
+                    .putString(KEY_ACTIVE_RECORDS_INDEX_URI, recordsUri.toString())
+                    .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, emptySet())
+                    .commit()
+                if (!saved) throw IOException("Unable to save the active records file.")
+                runOnUiThread {
+                    if (!isFinishing) {
+                        isPreparingRecordsFile = false
+                        recordedCodeGrids.clear()
+                        pendingCodeGrids.clear()
+                        updateRecordButtons(trackingService?.latestPosition())
+                        updateTrackingUi(trackingService?.snapshot())
+                        startTrackingService(action)
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (!isFinishing) {
+                        isPreparingRecordsFile = false
+                        updateTrackingUi(trackingService?.snapshot())
+                        Toast.makeText(
+                            this,
+                            "Unable to create records CSV: ${error.message ?: "storage error"}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startTrackingService(action: String) {
         val intent = Intent(this, TrackingService::class.java).setAction(action)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -451,8 +700,12 @@ class MainActivity : Activity() {
 
     private fun updateTrackingUi(snapshot: TrackSnapshot?) {
         val isTracking = snapshot?.isTracking == true
-        trackingButton.isEnabled = !isSavingTrack
-        trackingButton.text = if (isTracking) "Pause tracking" else "Start tracking"
+        trackingButton.isEnabled = !isSavingTrack && !isPreparingRecordsFile
+        trackingButton.text = when {
+            isPreparingRecordsFile -> "Preparing records CSV…"
+            isTracking -> "Pause tracking"
+            else -> "Start tracking"
+        }
         trackingSaveButton.isEnabled = !isSavingTrack && snapshot != null && !isTracking
         trackingClearButton.isEnabled = !isSavingTrack && snapshot != null && !isTracking
         trackingStatus.text = when {
@@ -513,7 +766,7 @@ class MainActivity : Activity() {
         } else {
             "Not selected"
         }
-        trackingFolderLabel.text = "GPX save folder: $folder"
+        projectFolderLabel.text = "Project folder: $folder"
     }
 
     private fun folderLabel(uri: Uri): String {
@@ -544,7 +797,9 @@ class MainActivity : Activity() {
                 .putString(KEY_GPX_FOLDER_LABEL, label)
                 .apply()
             updateGpxFolderLabel()
-            Toast.makeText(this, "GPX folder selected.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Project folder selected.", Toast.LENGTH_SHORT).show()
+            loadBasemap()
+            loadShortcuts()
         } catch (error: Exception) {
             Toast.makeText(
                 this,
@@ -559,7 +814,7 @@ class MainActivity : Activity() {
         val snapshot = service?.snapshot()
         if (service == null || snapshot == null || snapshot.isTracking) return
         if (!getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_GPX_FOLDER_URI)) {
-            Toast.makeText(this, "Choose a GPX save folder before saving.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Choose a project folder in Settings before saving.", Toast.LENGTH_LONG).show()
             return
         }
         saveCurrentTrack()
@@ -616,7 +871,8 @@ class MainActivity : Activity() {
             ?: throw IOException("Choose a GPX save folder before saving.")
         val folderUri = Uri.parse(folderUriString)
         val savedFilename = saveTrackToSelectedFolder(folderUri, filename, points)
-        val folder = prefs.getString(KEY_GPX_FOLDER_LABEL, "Selected folder") ?: "Selected folder"
+        val projectFolder = prefs.getString(KEY_GPX_FOLDER_LABEL, "Selected folder") ?: "Selected folder"
+        val folder = "$projectFolder/tracks"
         return GpxSaveResult(folder, savedFilename)
     }
 
@@ -625,10 +881,9 @@ class MainActivity : Activity() {
         filename: String,
         points: List<TrackPoint>,
     ): String {
-        val parentUri = DocumentsContract.buildDocumentUriUsingTree(
-            treeUri,
-            DocumentsContract.getTreeDocumentId(treeUri),
-        )
+        val projectDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+        val tracksDocumentId = findOrCreateDirectory(treeUri, projectDocumentId, "tracks")
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, tracksDocumentId)
         val fileUri = DocumentsContract.createDocument(
             contentResolver,
             parentUri,
@@ -720,6 +975,11 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (!isFinishing) {
                         mapView.setError(error.message ?: "Unable to load the basemap.")
+                        Toast.makeText(
+                            this,
+                            error.message ?: "Unable to load the basemap.",
+                            Toast.LENGTH_LONG,
+                        ).show()
                     }
                 }
             }
@@ -727,17 +987,32 @@ class MainActivity : Activity() {
     }
 
     private fun readTiles(): List<RasterTile> {
-        val names = assets.list("basemap")
-            ?.filter { it.endsWith(".jpg", ignoreCase = true) }
-            ?.sorted()
-            .orEmpty()
-        check(names.isNotEmpty()) { "No basemap JPEG files were found in app/src/main/assets/basemap." }
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val treeUri = prefs.getString(KEY_GPX_FOLDER_URI, null)?.let(Uri::parse)
+            ?: throw IOException("Choose a project folder in Settings to load the basemap.")
+        val projectDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+        val basemapDocumentId = findDirectory(treeUri, projectDocumentId, "basemap")
+            ?: throw IOException("The selected project folder has no basemap folder.")
+        val children = listChildren(treeUri, basemapDocumentId)
+        val filesByName = children.associateBy { it.displayName.lowercase(Locale.ROOT) }
+        val images = children
+            .filter { it.displayName.endsWith(".jpg", ignoreCase = true) }
+            .sortedBy { it.displayName }
+        if (images.isEmpty()) {
+            throw IOException("The basemap folder contains no JPEG images.")
+        }
 
-        return names.map { imageName ->
+        return images.map { image ->
+            val imageName = image.displayName
             val worldName = imageName.substringBeforeLast('.') + ".wld"
-            val values = assets.open("basemap/$worldName").bufferedReader().useLines { lines ->
-                lines.map(String::trim).filter(String::isNotEmpty).map(String::toDouble).toList()
-            }
+            val worldFile = filesByName[worldName.lowercase(Locale.ROOT)]
+                ?: throw IOException("The basemap folder is missing $worldName.")
+            val worldUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, worldFile.documentId)
+            val values = contentResolver.openInputStream(worldUri)
+                ?.bufferedReader()
+                ?.useLines { lines ->
+                    lines.map(String::trim).filter(String::isNotEmpty).map(String::toDouble).toList()
+                } ?: throw IOException("Unable to open basemap world file $worldName.")
             check(values.size == 6) { "Expected six world-file values in $worldName." }
 
             val pixelX = values[0]
@@ -753,7 +1028,8 @@ class MainActivity : Activity() {
                     pixelY < 0.0,
             ) { "Unsupported rotated or non-north-up world file: $worldName." }
 
-            val bitmap = assets.open("basemap/$imageName").use { stream ->
+            val imageUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, image.documentId)
+            val bitmap = contentResolver.openInputStream(imageUri)?.use { stream ->
                 BitmapFactory.decodeStream(
                     stream,
                     null,
@@ -772,6 +1048,432 @@ class MainActivity : Activity() {
                 pixelHeight = -pixelY,
             )
         }
+    }
+
+        private fun loadShortcuts() {
+            loader.execute {
+                try {
+                    val result = readShortcutTemplates()
+                    runOnUiThread {
+                        if (!isFinishing) showShortcutTemplates(result)
+                    }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        if (!isFinishing) {
+                            showShortcutTemplates(
+                                ShortcutLoadResult(
+                                    null,
+                                    "Unable to load shortcuts.csv: ${error.message ?: "file error"}",
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun readShortcutTemplates(): ShortcutLoadResult {
+            val treeUri = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_GPX_FOLDER_URI, null)
+                ?.let(Uri::parse)
+                ?: return ShortcutLoadResult(
+                    null,
+                    "Select a project folder in Settings to load recording templates.",
+                )
+            val projectDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
+            val shortcutsFile = listChildren(treeUri, projectDocumentId)
+                .firstOrNull {
+                    it.displayName.equals("shortcuts.csv", ignoreCase = true) &&
+                        it.mimeType != DocumentsContract.Document.MIME_TYPE_DIR
+                }
+                ?: return ShortcutLoadResult(null, "No shortcuts.csv found in the project folder.")
+            val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, shortcutsFile.documentId)
+            val csv = contentResolver.openInputStream(fileUri)
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText() }
+                ?: throw IOException("Unable to open shortcuts.csv.")
+            val rows = parseCsv(csv.removePrefix("\uFEFF"))
+            if (rows.isEmpty()) throw IOException("shortcuts.csv is empty.")
+            val codeColumn = rows.first().indexOfFirst { it.trim().equals("code", ignoreCase = true) }
+            if (codeColumn < 0) throw IOException("shortcuts.csv is missing the 'code' column.")
+            val templates = rows.drop(1).mapNotNull { row ->
+                val code = row.getOrNull(codeColumn)?.trim()?.takeIf(String::isNotEmpty)
+                code?.let { ShortcutTemplate(it, row) }
+            }
+            val data = ShortcutData(rows.first(), codeColumn, templates)
+            val message = if (templates.isEmpty()) {
+                "No recording templates found in shortcuts.csv."
+            } else {
+                "Choose a biological recording template."
+            }
+            return ShortcutLoadResult(data, message)
+        }
+
+        private fun showShortcutTemplates(result: ShortcutLoadResult) {
+            recordsStatus.text = result.message
+            recordsButtons.removeAllViews()
+            recordTemplateButtons.clear()
+            val data = result.data ?: return
+            data.templates.forEach { template ->
+                val button = Button(this).apply {
+                    text = template.code
+                    setOnClickListener { onRecordTemplateClicked(data, template) }
+                }
+                recordTemplateButtons.add(template to button)
+                recordsButtons.addView(
+                    button,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply { topMargin = dp(8) },
+                )
+            }
+            updateRecordButtons(trackingService?.latestPosition())
+        }
+
+        private fun updateRecordButtons(position: TrackPoint?) {
+            val gridReference = position?.let { point ->
+                val precision = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getInt(KEY_GRID_REFERENCE_PRECISION, DEFAULT_GRID_REFERENCE_PRECISION)
+                try {
+                    BritishNationalGrid.toGridReference(point.easting, point.northing, precision)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            }
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val projectMatches = prefs.getString(KEY_GPX_FOLDER_URI, null) ==
+                prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null)
+            recordTemplateButtons.forEach { (template, button) ->
+                val key = gridReference?.let { RecordCodeGrid(template.code, it) }
+                val isAlreadyRecorded = projectMatches && key != null &&
+                    (key in recordedCodeGrids || key in pendingCodeGrids)
+                if (button.isEnabled == isAlreadyRecorded) {
+                    button.isEnabled = !isAlreadyRecorded
+                }
+            }
+        }
+
+        private fun restoreRecordCodeGrids() {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val activeUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)
+            if (activeUri == null || activeUri != prefs.getString(KEY_ACTIVE_RECORDS_INDEX_URI, null)) {
+                return
+            }
+            prefs.getStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, emptySet()).orEmpty().forEach { encoded ->
+                val parts = encoded.split(':', limit = 2)
+                if (parts.size == 2) {
+                    val code = Base64.decode(parts[0], Base64.NO_WRAP).toString(Charsets.UTF_8)
+                    recordedCodeGrids.add(RecordCodeGrid(code, parts[1]))
+                }
+            }
+        }
+
+        private fun persistRecordCodeGrids() {
+            val encoded = recordedCodeGrids.map { key ->
+                val code = Base64.encodeToString(key.code.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                "$code:${key.gridReference}"
+            }.toSet()
+            getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, encoded)
+                .apply()
+        }
+
+        private fun onRecordTemplateClicked(data: ShortcutData, template: ShortcutTemplate) {
+            val service = trackingService
+            if (service?.snapshot()?.isTracking != true) {
+                Toast.makeText(this, "Start tracking before recording an observation.", Toast.LENGTH_LONG).show()
+                return
+            }
+            val point = service.latestPosition()
+            if (point == null) {
+                Toast.makeText(this, "Waiting for a GPS fix before recording.", Toast.LENGTH_LONG).show()
+                return
+            }
+
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val locationName = prefs.getString(KEY_CURRENT_LOCATION_NAME, "").orEmpty().trim()
+            val projectUri = prefs.getString(KEY_GPX_FOLDER_URI, null)
+            if (projectUri == null || prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) != projectUri) {
+                Toast.makeText(
+                    this,
+                    "Pause tracking and start it again to create a records file for this project folder.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return
+            }
+            val recordsUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
+            if (recordsUri == null) {
+                Toast.makeText(this, "No records CSV is active. Start tracking again.", Toast.LENGTH_LONG).show()
+                return
+            }
+
+            val date = SimpleDateFormat("dd/MM/yyyy", Locale.UK).format(Date(point.timestamp))
+            val includeSeconds = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean(KEY_RECORD_TIME_SECONDS, DEFAULT_RECORD_TIME_SECONDS)
+            val timePattern = if (includeSeconds) "HH:mm:ss" else "HH:mm"
+            val time = SimpleDateFormat(timePattern, Locale.UK).format(Date(point.timestamp))
+            val gridPrecision = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getInt(KEY_GRID_REFERENCE_PRECISION, DEFAULT_GRID_REFERENCE_PRECISION)
+            val gridReference = try {
+                BritishNationalGrid.toGridReference(point.easting, point.northing, gridPrecision)
+            } catch (error: IllegalArgumentException) {
+                Toast.makeText(
+                    this,
+                    error.message ?: "The GPS position has no valid British National Grid reference.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return
+            }
+            val recordKey = RecordCodeGrid(template.code, gridReference)
+            if (recordKey in recordedCodeGrids || recordKey in pendingCodeGrids) return
+            pendingCodeGrids.add(recordKey)
+            updateRecordButtons(point)
+            val values = data.headers.indices
+                .filter { it != data.codeColumnIndex }
+                .map { index ->
+                    template.fields.getOrElse(index) { "" }
+                        .replace("#date#", date, ignoreCase = true)
+                        .replace("#time#", time, ignoreCase = true)
+                        .replace("#gr#", gridReference, ignoreCase = true)
+                        .replace("#site#", locationName, ignoreCase = true)
+                        .replace("#comment#", "", ignoreCase = true)
+                }
+
+            saver.execute {
+                try {
+                    val output = contentResolver.openOutputStream(recordsUri, "wa")
+                        ?: throw IOException("Android could not open the records CSV for appending.")
+                    output.bufferedWriter(Charsets.UTF_8).use { it.appendLine(encodeCsvRow(values)) }
+                    runOnUiThread {
+                        if (!isFinishing) {
+                            pendingCodeGrids.remove(recordKey)
+                            recordedCodeGrids.add(recordKey)
+                            persistRecordCodeGrids()
+                            updateRecordButtons(trackingService?.latestPosition())
+                            showRecordCreatedMessage(locationName)
+                        }
+                    }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        if (!isFinishing) {
+                            pendingCodeGrids.remove(recordKey)
+                            updateRecordButtons(trackingService?.latestPosition())
+                            Toast.makeText(
+                                this,
+                                "Unable to add record: ${error.message ?: "storage error"}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun showRecordCreatedMessage(locationName: String) {
+            val isLocationMissing = locationName.isEmpty()
+            val prefix = "Record added for "
+            val message = if (isLocationMissing) {
+                SpannableString("Record added, but no location name was set in Settings.")
+            } else {
+                SpannableString("$prefix$locationName.")
+            }
+            if (!isLocationMissing) {
+                message.setSpan(
+                    StyleSpan(Typeface.BOLD),
+                    prefix.length,
+                    prefix.length + locationName.length,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+            }
+            val messageView = TextView(this).apply {
+                text = message
+                textSize = 16f
+                setTextColor(Color.rgb(45, 50, 46))
+                gravity = Gravity.CENTER
+                setPadding(dp(24), dp(18), dp(24), dp(18))
+                background = GradientDrawable().apply {
+                    setColor(if (isLocationMissing) Color.rgb(255, 193, 7) else Color.WHITE)
+                    cornerRadius = dp(12).toFloat()
+                    if (!isLocationMissing) setStroke(dp(1), Color.rgb(32, 90, 60))
+                }
+                elevation = dp(8).toFloat()
+            }
+            val dialog = Dialog(this)
+            dialog.setContentView(messageView)
+            dialog.setCancelable(true)
+            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            dialog.show()
+            dialog.window?.apply {
+                setGravity(Gravity.CENTER)
+                setLayout(
+                    (resources.displayMetrics.widthPixels * 0.85f).toInt(),
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+            }
+            Handler(Looper.getMainLooper()).postDelayed(
+                { if (dialog.isShowing) dialog.dismiss() },
+                if (isLocationMissing) RECORD_MESSAGE_DURATION_MS else RECORD_LOCATION_MESSAGE_DURATION_MS,
+            )
+        }
+
+        private fun parseCsv(contents: String): List<List<String>> {
+            val rows = mutableListOf<List<String>>()
+            var row = mutableListOf<String>()
+            val field = StringBuilder()
+            var inQuotes = false
+            var index = 0
+            while (index < contents.length) {
+                val character = contents[index]
+                if (inQuotes) {
+                    if (character == '"') {
+                        if (index + 1 < contents.length && contents[index + 1] == '"') {
+                            field.append('"')
+                            index++
+                        } else {
+                            inQuotes = false
+                        }
+                    } else {
+                        field.append(character)
+                    }
+                } else {
+                    when (character) {
+                        '"' -> {
+                            if (field.isNotEmpty()) throw IOException("Invalid quoting in shortcuts.csv.")
+                            inQuotes = true
+                        }
+                        ',' -> {
+                            row.add(field.toString())
+                            field.setLength(0)
+                        }
+                        '\r', '\n' -> {
+                            row.add(field.toString())
+                            field.setLength(0)
+                            rows.add(row)
+                            row = mutableListOf()
+                            if (character == '\r' && index + 1 < contents.length && contents[index + 1] == '\n') {
+                                index++
+                            }
+                        }
+                        else -> field.append(character)
+                    }
+                }
+                index++
+            }
+            if (inQuotes) throw IOException("Unclosed quoted field in shortcuts.csv.")
+            if (field.isNotEmpty() || row.isNotEmpty()) {
+                row.add(field.toString())
+                rows.add(row)
+            }
+            return rows
+        }
+
+        private fun createRecordsFile(projectTreeUri: Uri, shortcuts: ShortcutData): Uri {
+            val projectDocumentId = DocumentsContract.getTreeDocumentId(projectTreeUri)
+            val existingNames = listChildren(projectTreeUri, projectDocumentId)
+                .map { it.displayName }
+                .toSet()
+            var createdAt = System.currentTimeMillis()
+            var filename = recordsFilename(createdAt)
+            while (filename in existingNames) {
+                createdAt++
+                filename = recordsFilename(createdAt)
+            }
+
+            val fileUri = DocumentsContract.createDocument(
+                contentResolver,
+                DocumentsContract.buildDocumentUriUsingTree(projectTreeUri, projectDocumentId),
+                "text/csv",
+                filename,
+            ) ?: throw IOException("Android could not create $filename.")
+            try {
+                val output = contentResolver.openOutputStream(fileUri, "w")
+                    ?: throw IOException("Android could not open $filename for writing.")
+                val headers = shortcuts.headers.filterIndexed { index, _ ->
+                    index != shortcuts.codeColumnIndex
+                }
+                output.bufferedWriter(Charsets.UTF_8).use { it.appendLine(encodeCsvRow(headers)) }
+            } catch (error: Exception) {
+                try {
+                    DocumentsContract.deleteDocument(contentResolver, fileUri)
+                } catch (cleanupError: Exception) {
+                    error.addSuppressed(cleanupError)
+                }
+                throw error
+            }
+            return fileUri
+        }
+
+        private fun recordsFilename(timestamp: Long): String =
+            "records-${SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date(timestamp))}.csv"
+
+        private fun encodeCsvRow(values: List<String>): String =
+            values.joinToString(",") { value ->
+                if (value.any { it == ',' || it == '"' || it == '\r' || it == '\n' }) {
+                    "\"${value.replace("\"", "\"\"")}\""
+                } else {
+                    value
+                }
+            }
+
+    private data class ProjectDocument(
+        val documentId: String,
+        val displayName: String,
+        val mimeType: String,
+    )
+
+    private fun listChildren(treeUri: Uri, parentDocumentId: String): List<ProjectDocument> {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+        val columns = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+        val result = mutableListOf<ProjectDocument>()
+        val cursor = contentResolver.query(childrenUri, columns, null, null, null)
+            ?: throw IOException("Unable to read the selected project folder.")
+        cursor.use {
+            val idColumn = it.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn = it.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            val mimeColumn = it.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            while (it.moveToNext()) {
+                result.add(
+                    ProjectDocument(
+                        documentId = it.getString(idColumn),
+                        displayName = it.getString(nameColumn),
+                        mimeType = it.getString(mimeColumn),
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private fun findDirectory(treeUri: Uri, parentDocumentId: String, name: String): String? =
+        listChildren(treeUri, parentDocumentId)
+            .firstOrNull {
+                it.displayName.equals(name, ignoreCase = true) &&
+                    it.mimeType == DocumentsContract.Document.MIME_TYPE_DIR
+            }
+            ?.documentId
+
+    private fun findOrCreateDirectory(treeUri: Uri, parentDocumentId: String, name: String): String {
+        val children = listChildren(treeUri, parentDocumentId)
+        val existing = children.firstOrNull { it.displayName.equals(name, ignoreCase = true) }
+        if (existing != null) {
+            if (existing.mimeType != DocumentsContract.Document.MIME_TYPE_DIR) {
+                throw IOException("A file named $name already exists in the project folder.")
+            }
+            return existing.documentId
+        }
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocumentId)
+        val createdUri = DocumentsContract.createDocument(
+            contentResolver,
+            parentUri,
+            DocumentsContract.Document.MIME_TYPE_DIR,
+            name,
+        ) ?: throw IOException("Android could not create the $name folder.")
+        return DocumentsContract.getDocumentId(createdUri)
     }
 
     @Suppress("MissingPermission")
@@ -870,7 +1572,18 @@ class MainActivity : Activity() {
         const val KEY_SCALE = "scale"
         const val KEY_GPX_FOLDER_URI = "gpx_folder_uri"
         const val KEY_GPX_FOLDER_LABEL = "gpx_folder_label"
+        const val KEY_ACTIVE_RECORDS_URI = "active_records_uri"
+        const val KEY_ACTIVE_RECORDS_PROJECT_URI = "active_records_project_uri"
+        const val KEY_ACTIVE_RECORDS_INDEX_URI = "active_records_index_uri"
+        const val KEY_ACTIVE_RECORDS_CODE_GRIDS = "active_records_code_grids"
+        const val KEY_GRID_REFERENCE_PRECISION = "grid_reference_precision"
+        const val KEY_RECORD_TIME_SECONDS = "record_time_seconds"
+        const val KEY_CURRENT_LOCATION_NAME = "current_location_name"
         const val KEY_MOVEMENT_THRESHOLD = "movement_threshold"
+        const val RECORD_MESSAGE_DURATION_MS = 2500L
+        const val RECORD_LOCATION_MESSAGE_DURATION_MS = 850L
+        const val DEFAULT_GRID_REFERENCE_PRECISION = 10
+        const val DEFAULT_RECORD_TIME_SECONDS = true
         const val DEFAULT_MOVEMENT_THRESHOLD_METRES = 5
         const val MIN_MOVEMENT_THRESHOLD_METRES = 1
         const val MAX_MOVEMENT_THRESHOLD_METRES = 20
@@ -879,6 +1592,8 @@ class MainActivity : Activity() {
     private enum class Screen {
         MAP,
         TRACKING,
+        SETTINGS,
+        RECORDS,
     }
 
     override fun onDestroy() {
@@ -892,8 +1607,10 @@ private class NavigationItem(
     context: Context,
     private val label: String,
     private val tracking: Boolean,
+    private val settings: Boolean = false,
+    private val records: Boolean = false,
 ) : LinearLayout(context) {
-    private val icon = NavigationIcon(context, tracking)
+    private val icon = NavigationIcon(context, tracking, settings, records)
     private val title = TextView(context).apply {
         text = label
         textSize = 12f
@@ -927,6 +1644,8 @@ private class NavigationItem(
 private class NavigationIcon(
     context: Context,
     private val tracking: Boolean,
+    private val settings: Boolean,
+    private val records: Boolean,
 ) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -957,6 +1676,26 @@ private class NavigationIcon(
             canvas.drawPath(path, paint)
             canvas.drawCircle(cx - 7f * scale, cy + 6f * scale, 1.8f * scale, paint)
             canvas.drawCircle(cx + 7f * scale, cy - 5f * scale, 1.8f * scale, paint)
+        } else if (settings) {
+            val radius = 6f * scale
+            canvas.drawCircle(cx, cy, radius, paint)
+            canvas.drawCircle(cx, cy, 2f * scale, paint)
+            for (index in 0 until 8) {
+                val angle = index * Math.PI / 4.0
+                val innerRadius = 7f * scale
+                val outerRadius = 9f * scale
+                val startX = cx + kotlin.math.cos(angle).toFloat() * innerRadius
+                val startY = cy + kotlin.math.sin(angle).toFloat() * innerRadius
+                val endX = cx + kotlin.math.cos(angle).toFloat() * outerRadius
+                val endY = cy + kotlin.math.sin(angle).toFloat() * outerRadius
+                canvas.drawLine(startX, startY, endX, endY, paint)
+            }
+        } else if (records) {
+            for (index in -1..1) {
+                val y = cy + index * 6f * scale
+                canvas.drawCircle(cx - 7f * scale, y, 1f * scale, paint)
+                canvas.drawLine(cx - 3f * scale, y, cx + 8f * scale, y, paint)
+            }
         } else {
             val path = Path().apply {
                 moveTo(cx - 8f * scale, cy - 5f * scale)
