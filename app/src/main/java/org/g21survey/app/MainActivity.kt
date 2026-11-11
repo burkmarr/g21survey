@@ -30,6 +30,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.DocumentsContract
+import android.speech.RecognizerIntent
 import android.text.Editable
 import android.text.InputType
 import android.text.SpannableString
@@ -87,6 +88,7 @@ private data class ShortcutData(
     val excludedColumnIndices: Set<Int>
         get() = setOf(codeColumnIndex, surveyColumnIndex)
 }
+
 private data class ShortcutLoadResult(val data: ShortcutData?, val message: String)
 
 class MainActivity : Activity() {
@@ -123,6 +125,7 @@ class MainActivity : Activity() {
     private var isSavingTrack = false
     private var isPreparingRecordsFile = false
     private var shortcutData: ShortcutData? = null
+    private var speechCommentInput: EditText? = null
     private var currentScreen = Screen.MAP
     private var editRequest = 0
 
@@ -342,6 +345,7 @@ class MainActivity : Activity() {
     private fun showScreen(screen: Screen) {
         currentScreen = screen
         editRequest++
+        if (screen != Screen.EDIT) speechCommentInput = null
         val isMap = screen == Screen.MAP
         val isTracking = screen == Screen.TRACKING
         val isSettings = screen == Screen.SETTINGS
@@ -781,8 +785,39 @@ class MainActivity : Activity() {
         return path.ifBlank { "Internal storage" }
     }
 
+    private fun requestCommentSpeech(input: EditText) {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a record comment")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        speechCommentInput = input
+        try {
+            startActivityForResult(intent, SPEECH_COMMENT_REQUEST)
+        } catch (_: ActivityNotFoundException) {
+            speechCommentInput = null
+            Toast.makeText(this, "Speech recognition is not available on this device.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == SPEECH_COMMENT_REQUEST) {
+            if (resultCode != RESULT_OK) return
+            val input = speechCommentInput ?: return
+            val recognizedText = data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (recognizedText.isNullOrBlank()) {
+                Toast.makeText(this, "No speech was recognized.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val comment = appendRecognizedSpeech(input.text.toString(), recognizedText)
+            input.setText(comment)
+            input.setSelection(comment.length)
+            return
+        }
         if (requestCode != SELECT_GPX_FOLDER_REQUEST || resultCode != RESULT_OK) return
         val uri = data?.data
         if (uri == null) {
@@ -1340,6 +1375,7 @@ class MainActivity : Activity() {
         }
 
         private fun loadSurveyRecords() {
+            speechCommentInput = null
             val request = ++editRequest
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val uri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
@@ -1428,28 +1464,100 @@ class MainActivity : Activity() {
             editScreen.removeAllViews()
             val form = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(20), dp(16), dp(20), dp(12))
+                setPadding(dp(16), dp(16), dp(16), dp(24))
+                setBackgroundColor(Color.rgb(247, 248, 246))
             }
+            form.addView(TextView(this).apply {
+                text = "Edit record"
+                textSize = 21f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.rgb(32, 45, 37))
+            })
+            form.addView(TextView(this).apply {
+                text = "Update the taxon or observation details."
+                textSize = 14f
+                setTextColor(Color.rgb(100, 110, 103))
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(16) })
+
+            fun sectionCard(title: String, description: String): LinearLayout {
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(16), dp(14), dp(16), dp(16))
+                    background = GradientDrawable().apply {
+                        setColor(Color.WHITE)
+                        cornerRadius = dp(10).toFloat()
+                        setStroke(dp(1), Color.rgb(225, 228, 224))
+                    }
+                }
+                card.addView(TextView(this).apply {
+                    text = title
+                    textSize = 16f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(Color.rgb(32, 90, 60))
+                })
+                card.addView(TextView(this).apply {
+                    text = description
+                    textSize = 13f
+                    setTextColor(Color.rgb(100, 110, 103))
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(14) })
+                return card
+            }
+
             fun label(text: String) = TextView(this).apply {
                 this.text = text
-                textSize = 16f
+                textSize = 14f
+                setTypeface(null, Typeface.BOLD)
                 setTextColor(Color.rgb(55, 65, 58))
             }
-            form.addView(label("Code"))
+
+            fun inputBackground(color: Int = Color.WHITE) = GradientDrawable().apply {
+                setColor(color)
+                cornerRadius = dp(6).toFloat()
+                setStroke(dp(1), Color.rgb(205, 211, 206))
+            }
+
+            val codeCard = sectionCard("Taxon", "Choose the code for this record.")
+            codeCard.addView(label("Code"), LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(6) })
             val codeInput = Spinner(this).apply {
                 adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, codes)
                 setSelection(codes.indexOf(record.code))
+                background = inputBackground()
+                setPadding(dp(12), dp(4), dp(12), dp(4))
             }
-            form.addView(codeInput)
-            fun textInput(tag: String, multiline: Boolean = false): EditText {
-                form.addView(label(tag.replaceFirstChar { it.uppercase() }))
+            codeCard.addView(codeInput, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52),
+            ))
+            form.addView(codeCard, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) })
+
+            val detailsCard = sectionCard("Observation details", "Edit quantity, site, or comment.")
+            fun textInput(
+                tag: String,
+                multiline: Boolean = false,
+                speechInput: Boolean = false,
+            ): EditText {
                 val column = outputColumnForTag(data.tags, data.excludedColumnIndices, tag)
-                return EditText(this).apply {
-                    inputType = InputType.TYPE_CLASS_TEXT
+                val input = EditText(this).apply {
+                    inputType = InputType.TYPE_CLASS_TEXT or
+                        if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0
                     setSingleLine(!multiline)
                     if (multiline) {
-                        minLines = 3
+                        minLines = 4
                         gravity = Gravity.TOP or Gravity.START
+                    } else {
+                        minHeight = dp(48)
                     }
                     if (column != null && column in record.values.indices) {
                         setText(record.values[column])
@@ -1457,19 +1565,64 @@ class MainActivity : Activity() {
                         hint = "Missing $tag tag in shortcuts.csv"
                         isEnabled = false
                     }
-                    form.addView(this)
+                    background = inputBackground(if (isEnabled) Color.WHITE else Color.rgb(242, 243, 241))
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
                 }
+                val field = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                if (speechInput) {
+                    val heading = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(label(tag.replaceFirstChar { it.uppercase() }),
+                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                                bottomMargin = dp(6)
+                            })
+                        addView(Button(this@MainActivity).apply {
+                            text = "Speak"
+                            isEnabled = input.isEnabled
+                            setOnClickListener { requestCommentSpeech(input) }
+                        }, LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                        ).apply { bottomMargin = dp(4) })
+                    }
+                    field.addView(heading)
+                } else {
+                    field.addView(label(tag.replaceFirstChar { it.uppercase() }),
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                        ).apply { bottomMargin = dp(6) })
+                }
+                field.addView(input)
+                detailsCard.addView(field, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(14) })
+                return input
             }
             val quantity = textInput("quantity")
             val site = textInput("site")
-            val comment = textInput("comment", multiline = true)
-            editScreen.addView(ScrollView(this).apply { addView(form) }, LinearLayout.LayoutParams(
+            val comment = textInput("comment", multiline = true, speechInput = true)
+            speechCommentInput = comment
+            form.addView(detailsCard)
+            editScreen.addView(ScrollView(this).apply {
+                isFillViewport = true
+                addView(form)
+            }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f,
             ))
             val actions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                setBackgroundColor(Color.rgb(247, 248, 246))
             }
+            editScreen.addView(View(this).apply {
+                setBackgroundColor(Color.rgb(225, 228, 224))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
             val cancel = Button(this).apply {
                 text = "Cancel"
                 setOnClickListener { loadSurveyRecords() }
@@ -1477,7 +1630,14 @@ class MainActivity : Activity() {
             val save = Button(this).apply { text = "Save" }
             val delete = Button(this).apply { text = "Delete" }
             listOf(cancel, save, delete).forEach {
-                actions.addView(it, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                actions.addView(it, LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f,
+                ).apply {
+                    marginStart = dp(4)
+                    marginEnd = dp(4)
+                })
             }
             editScreen.addView(actions)
             fun submit(deleting: Boolean) {
@@ -2029,6 +2189,7 @@ class MainActivity : Activity() {
         const val LOCATION_REQUEST = 1
         const val NOTIFICATION_REQUEST = 2
         const val SELECT_GPX_FOLDER_REQUEST = 4
+        const val SPEECH_COMMENT_REQUEST = 5
         const val PREFS = "map_view"
         const val KEY_CENTER_X = "center_x"
         const val KEY_CENTER_Y = "center_y"

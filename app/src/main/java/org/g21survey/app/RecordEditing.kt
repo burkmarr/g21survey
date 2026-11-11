@@ -110,3 +110,10 @@ internal fun surveyTaxaGridCounts(
         .filter { it.code in surveyTaxaCodes }
         .groupingBy { BritishNationalGrid.toSixFigureGridReference(it.gridReference) }
         .eachCount()
+
+internal fun appendRecognizedSpeech(comment: String, recognizedText: String): String {
+    val spoken = recognizedText.trim()
+    if (spoken.isEmpty()) return comment
+    val separator = if (comment.isEmpty() || comment.last().isWhitespace()) "" else " "
+    return comment + separator + spoken
+}

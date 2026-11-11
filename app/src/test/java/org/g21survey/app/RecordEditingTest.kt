@@ -78,6 +78,13 @@ class RecordEditingTest {
     }
 
     @Test
+    fun `recognized comments append without replacing existing text`() {
+        assertEquals("Existing note Spoken words", appendRecognizedSpeech("Existing note", " Spoken words "))
+        assertEquals("Spoken words", appendRecognizedSpeech("", "Spoken words"))
+        assertEquals("Existing note ", appendRecognizedSpeech("Existing note ", ""))
+    }
+
+    @Test
     fun `recording fills blank tagged fields and preserves literal and inline values`() {
         val headers = listOf("code", "date", "time", "grid", "site", "scientific", "comment", "extra")
         val tags = listOf("tags", "date", "time", "gr", "site", "scientific", "comment", "")
