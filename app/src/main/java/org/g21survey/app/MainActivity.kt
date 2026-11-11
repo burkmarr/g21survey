@@ -45,6 +45,7 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.Button
+import android.widget.ArrayAdapter
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -52,7 +53,10 @@ import android.widget.NumberPicker
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.io.IOException
@@ -70,14 +74,19 @@ private data class RasterTile(
     val pixelHeight: Double,
 )
 
-private data class GpxSaveResult(val folder: String, val filename: String)
-private data class ShortcutTemplate(val code: String, val fields: List<String>)
+private data class SurveyFiles(val recordsUri: Uri, val trackUri: Uri)
+private data class ShortcutTemplate(val code: String, val fields: List<String>, val isSurveyTaxon: Boolean)
 private data class RecordCodeGrid(val code: String, val gridReference: String)
 private data class ShortcutData(
     val headers: List<String>,
     val codeColumnIndex: Int,
+    val surveyColumnIndex: Int,
+    val tags: List<String>,
     val templates: List<ShortcutTemplate>,
-)
+) {
+    val excludedColumnIndices: Set<Int>
+        get() = setOf(codeColumnIndex, surveyColumnIndex)
+}
 private data class ShortcutLoadResult(val data: ShortcutData?, val message: String)
 
 class MainActivity : Activity() {
@@ -88,9 +97,9 @@ class MainActivity : Activity() {
     private lateinit var trackingScreen: View
     private lateinit var settingsScreen: View
     private lateinit var recordsScreen: View
+    private lateinit var editScreen: LinearLayout
     private lateinit var trackingButton: Button
     private lateinit var trackingSaveButton: Button
-    private lateinit var trackingClearButton: Button
     private lateinit var projectFolderButton: Button
     private lateinit var projectFolderLabel: TextView
     private lateinit var trackingStatus: TextView
@@ -100,6 +109,7 @@ class MainActivity : Activity() {
     private lateinit var trackingNavigationItem: NavigationItem
     private lateinit var settingsNavigationItem: NavigationItem
     private lateinit var recordsNavigationItem: NavigationItem
+    private lateinit var editNavigationItem: NavigationItem
     private lateinit var recordsStatus: TextView
     private lateinit var recordsButtons: LinearLayout
     private val recordTemplateButtons = mutableListOf<Pair<ShortcutTemplate, Button>>()
@@ -112,6 +122,9 @@ class MainActivity : Activity() {
     private var activityResumed = false
     private var isSavingTrack = false
     private var isPreparingRecordsFile = false
+    private var shortcutData: ShortcutData? = null
+    private var currentScreen = Screen.MAP
+    private var editRequest = 0
 
     private val trackingObserver = object : TrackingService.Observer {
         override fun onTrackChanged(
@@ -160,6 +173,8 @@ class MainActivity : Activity() {
                 updateRecordButtons(it)
             }
             if (snapshot?.isTracking == true) stopLocationUpdates()
+            if (currentScreen == Screen.EDIT) loadSurveyRecords()
+            refreshSurveyTaxaGridCounts()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -250,6 +265,15 @@ class MainActivity : Activity() {
             ),
         )
         recordsScreen.visibility = View.GONE
+        editScreen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(
+            editScreen,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        editScreen.visibility = View.GONE
 
         root.addView(heading)
         root.addView(
@@ -271,14 +295,17 @@ class MainActivity : Activity() {
         trackingNavigationItem = NavigationItem(this, "Tracking", tracking = true)
         settingsNavigationItem = NavigationItem(this, "Settings", tracking = false, settings = true)
         recordsNavigationItem = NavigationItem(this, "Records", tracking = false, records = true)
+        editNavigationItem = NavigationItem(this, "Edit", tracking = false, edit = true)
         mapNavigationItem.setItemSelected(true)
         trackingNavigationItem.setItemSelected(false)
         settingsNavigationItem.setItemSelected(false)
         recordsNavigationItem.setItemSelected(false)
+        editNavigationItem.setItemSelected(false)
         mapNavigationItem.setOnClickListener { showScreen(Screen.MAP) }
         trackingNavigationItem.setOnClickListener { showScreen(Screen.TRACKING) }
         settingsNavigationItem.setOnClickListener { showScreen(Screen.SETTINGS) }
         recordsNavigationItem.setOnClickListener { showScreen(Screen.RECORDS) }
+        editNavigationItem.setOnClickListener { showScreen(Screen.EDIT) }
         navigation.addView(
             mapNavigationItem,
             LinearLayout.LayoutParams(0, dp(64), 1f),
@@ -295,6 +322,10 @@ class MainActivity : Activity() {
             recordsNavigationItem,
             LinearLayout.LayoutParams(0, dp(64), 1f),
         )
+        navigation.addView(
+            editNavigationItem,
+            LinearLayout.LayoutParams(0, dp(64), 1f),
+        )
         root.addView(navigation)
 
         setContentView(root)
@@ -309,6 +340,8 @@ class MainActivity : Activity() {
     }
 
     private fun showScreen(screen: Screen) {
+        currentScreen = screen
+        editRequest++
         val isMap = screen == Screen.MAP
         val isTracking = screen == Screen.TRACKING
         val isSettings = screen == Screen.SETTINGS
@@ -317,16 +350,20 @@ class MainActivity : Activity() {
             Screen.TRACKING -> "Tracking"
             Screen.SETTINGS -> "Settings"
             Screen.RECORDS -> "Records"
+            Screen.EDIT -> "Edit"
         }
         mapView.visibility = if (isMap) View.VISIBLE else View.GONE
         mapView.setTrackingFlashVisible(isMap && activityResumed)
         trackingScreen.visibility = if (isTracking) View.VISIBLE else View.GONE
         settingsScreen.visibility = if (isSettings) View.VISIBLE else View.GONE
         recordsScreen.visibility = if (screen == Screen.RECORDS) View.VISIBLE else View.GONE
+        editScreen.visibility = if (screen == Screen.EDIT) View.VISIBLE else View.GONE
         mapNavigationItem.setItemSelected(isMap)
         trackingNavigationItem.setItemSelected(isTracking)
         settingsNavigationItem.setItemSelected(isSettings)
         recordsNavigationItem.setItemSelected(screen == Screen.RECORDS)
+        editNavigationItem.setItemSelected(screen == Screen.EDIT)
+        if (screen == Screen.EDIT) loadSurveyRecords()
     }
 
     private fun createTrackingScreen(): View {
@@ -360,18 +397,13 @@ class MainActivity : Activity() {
             }
         }
         trackingButton = Button(this).apply {
-            text = "Start tracking"
+            text = "Start survey"
             setOnClickListener { onTrackingButtonClicked() }
         }
         trackingSaveButton = Button(this).apply {
-            text = "Save GPX"
+            text = "End survey"
             isEnabled = false
-            setOnClickListener { onSaveTrackClicked() }
-        }
-        trackingClearButton = Button(this).apply {
-            text = "Clear GPX"
-            isEnabled = false
-            setOnClickListener { onClearTrackClicked() }
+            setOnClickListener { onEndSurveyClicked() }
         }
         controls.addView(
             trackingStatus,
@@ -409,13 +441,6 @@ class MainActivity : Activity() {
         )
         controls.addView(
             trackingSaveButton,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) },
-        )
-        controls.addView(
-            trackingClearButton,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -599,9 +624,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Tracking is still starting. Try again shortly.", Toast.LENGTH_SHORT).show()
             return
         }
-        val snapshot = service.snapshot()
-        if (snapshot?.isTracking == true) {
-            trackingService?.pauseTrack()
+        if (service.snapshot() != null) {
             return
         }
         if (!hasLocationPermission()) {
@@ -609,10 +632,10 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), LOCATION_REQUEST)
             return
         }
-        requestNotificationPermissionOrChooseTrack(snapshot)
+        requestNotificationPermissionOrStartSurvey()
     }
 
-    private fun requestNotificationPermissionOrChooseTrack(snapshot: TrackSnapshot?) {
+    private fun requestNotificationPermissionOrStartSurvey() {
         if (
             android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -622,28 +645,10 @@ class MainActivity : Activity() {
             return
         }
         pendingTrackStart = false
-        chooseTrackAction(snapshot)
+        requestTrackingService()
     }
 
-    private fun chooseTrackAction(snapshot: TrackSnapshot?) {
-        if (snapshot != null) {
-            AlertDialog.Builder(this)
-                .setTitle("Continue this track?")
-                .setMessage("A track is already in memory. Continue recording it or replace it with a new track?")
-                .setPositiveButton("Continue current track") { _, _ ->
-                    requestTrackingService(TrackingService.ACTION_CONTINUE)
-                }
-                .setNegativeButton("Replace with new track") { _, _ ->
-                    requestTrackingService(TrackingService.ACTION_START_NEW)
-                }
-                .setNeutralButton("Cancel", null)
-                .show()
-        } else {
-            requestTrackingService(TrackingService.ACTION_START_NEW)
-        }
-    }
-
-    private fun requestTrackingService(action: String) {
+    private fun requestTrackingService() {
         if (isPreparingRecordsFile) return
         isPreparingRecordsFile = true
         updateTrackingUi(trackingService?.snapshot())
@@ -655,22 +660,36 @@ class MainActivity : Activity() {
                 val shortcutResult = readShortcutTemplates()
                 val shortcuts = shortcutResult.data
                     ?: throw IOException(shortcutResult.message)
-                val recordsUri = createRecordsFile(Uri.parse(projectFolder), shortcuts)
+                if (prefs.contains(KEY_RECORDS_WRITE_JOURNAL)) {
+                    val previousUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
+                        ?: throw IOException("The previous records update needs recovery, but its file is unavailable.")
+                    readSurveyRecords(previousUri, shortcuts)
+                }
+                val files = createSurveyFiles(Uri.parse(projectFolder), shortcuts)
                 val saved = prefs.edit()
-                    .putString(KEY_ACTIVE_RECORDS_URI, recordsUri.toString())
+                    .putString(KEY_ACTIVE_RECORDS_URI, files.recordsUri.toString())
                     .putString(KEY_ACTIVE_RECORDS_PROJECT_URI, projectFolder)
-                    .putString(KEY_ACTIVE_RECORDS_INDEX_URI, recordsUri.toString())
+                    .putString(KEY_ACTIVE_RECORDS_INDEX_URI, files.recordsUri.toString())
                     .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, emptySet())
+                    .putString(KEY_ACTIVE_RECORDS_METADATA, "[]")
+                    .putString(KEY_ACTIVE_TRACK_URI, files.trackUri.toString())
+                    .putString(KEY_ACTIVE_TRACK_PROJECT_URI, projectFolder)
                     .commit()
-                if (!saved) throw IOException("Unable to save the active records file.")
+                if (!saved) {
+                    val error = IOException("Unable to save the active survey files.")
+                    cleanupSurveyFiles(files, error)
+                    throw error
+                }
                 runOnUiThread {
                     if (!isFinishing) {
                         isPreparingRecordsFile = false
+                        showShortcutTemplates(shortcutResult)
                         recordedCodeGrids.clear()
                         pendingCodeGrids.clear()
+                        mapView.setSurveyGridSquares(emptyMap())
                         updateRecordButtons(trackingService?.latestPosition())
                         updateTrackingUi(trackingService?.snapshot())
-                        startTrackingService(action)
+                        startTrackingService(TrackingService.ACTION_START_SURVEY)
                     }
                 }
             } catch (error: Exception) {
@@ -680,7 +699,7 @@ class MainActivity : Activity() {
                         updateTrackingUi(trackingService?.snapshot())
                         Toast.makeText(
                             this,
-                            "Unable to create records CSV: ${error.message ?: "storage error"}",
+                            "Unable to start survey: ${error.message ?: "storage error"}",
                             Toast.LENGTH_LONG,
                         ).show()
                     }
@@ -702,17 +721,17 @@ class MainActivity : Activity() {
         val isTracking = snapshot?.isTracking == true
         trackingButton.isEnabled = !isSavingTrack && !isPreparingRecordsFile
         trackingButton.text = when {
-            isPreparingRecordsFile -> "Preparing records CSV…"
-            isTracking -> "Pause tracking"
-            else -> "Start tracking"
+            isPreparingRecordsFile -> "Preparing survey files…"
+            else -> "Start survey"
         }
-        trackingSaveButton.isEnabled = !isSavingTrack && snapshot != null && !isTracking
-        trackingClearButton.isEnabled = !isSavingTrack && snapshot != null && !isTracking
+        trackingButton.isEnabled = trackingButton.isEnabled && snapshot == null
+        trackingSaveButton.isEnabled = !isSavingTrack && snapshot != null
+        trackingSaveButton.text = if (isSavingTrack) "Saving…" else "End survey"
         trackingStatus.text = when {
             snapshot?.error != null -> snapshot.error
-            isTracking -> "Tracking in progress"
-            snapshot != null -> "Tracking paused"
-            else -> "Tracking is off"
+            isTracking -> "Survey in progress"
+            snapshot != null -> "Survey stopped; end survey to save"
+            else -> "Survey is off"
         }
         trackingSummary.text = snapshot?.let { current ->
             val started = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
@@ -723,19 +742,6 @@ class MainActivity : Activity() {
             val length = formatTrackLength(current.lengthMeters)
             "Started: $started\nLength: $length\nElapsed: $elapsed\nGPS fixes: ${current.gpsFixCount}\nRecorded points: ${current.pointCount}"
         } ?: "No current track"
-    }
-
-    private fun onClearTrackClicked() {
-        AlertDialog.Builder(this)
-            .setTitle("Clear current GPX track?")
-            .setMessage("This will permanently remove the track from memory.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Clear GPX") { _, _ ->
-                if (trackingService?.clearTrack() != true) {
-                    Toast.makeText(this, "The track could not be cleared.", Toast.LENGTH_LONG).show()
-                }
-            }
-            .show()
     }
 
     private fun formatTrackLength(metres: Double): String {
@@ -809,42 +815,40 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onSaveTrackClicked() {
+    private fun onEndSurveyClicked() {
         val service = trackingService
         val snapshot = service?.snapshot()
-        if (service == null || snapshot == null || snapshot.isTracking) return
-        if (!getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_GPX_FOLDER_URI)) {
-            Toast.makeText(this, "Choose a project folder in Settings before saving.", Toast.LENGTH_LONG).show()
-            return
-        }
-        saveCurrentTrack()
-    }
-
-    private fun saveCurrentTrack() {
-        val service = trackingService
-        val snapshot = service?.snapshot()
-        if (service == null || snapshot == null || snapshot.isTracking) return
-        val points = service.trackPoints()
+        if (service == null || snapshot == null || isSavingTrack) return
         isSavingTrack = true
-        updateTrackingUi(snapshot)
-        trackingSaveButton.text = "Saving…"
+        if (snapshot.isTracking) service.stopTrack()
+        val points = service.trackPoints()
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val trackUri = prefs.getString(KEY_ACTIVE_TRACK_URI, null)?.let(Uri::parse)
         saver.execute {
             try {
-                val savedTrack = saveTrack(points)
+                val activeProject = prefs.getString(KEY_ACTIVE_TRACK_PROJECT_URI, null)
+                if (trackUri == null || activeProject == null) {
+                    throw IOException("No GPX file is active for this survey.")
+                }
+                saveTrackToDocument(trackUri, points)
                 runOnUiThread {
                     if (!isFinishing) {
                         isSavingTrack = false
-                        updateTrackingUi(trackingService?.snapshot())
-                        AlertDialog.Builder(this)
-                            .setTitle("Track saved")
-                            .setMessage("Saved to ${savedTrack.folder}/${savedTrack.filename}.\n\nWould you like to clear the current track?")
-                            .setPositiveButton("Clear current track") { _, _ ->
-                                if (trackingService?.clearTrack() != true) {
-                                    Toast.makeText(this, "The track could not be cleared.", Toast.LENGTH_LONG).show()
-                                }
+                        if (trackingService?.clearTrack() == true) {
+                            prefs.edit()
+                                .remove(KEY_ACTIVE_TRACK_URI)
+                                .remove(KEY_ACTIVE_TRACK_PROJECT_URI)
+                                .apply()
+                            if (currentScreen == Screen.EDIT) loadSurveyRecords()
+                            Toast.makeText(this, "Survey ended and GPX track saved.", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(
+                                this,
+                                "The GPX was saved, but the in-memory track could not be cleared.",
+                                Toast.LENGTH_LONG,
+                            ).show()
                             }
-                            .setNegativeButton("Keep track", null)
-                            .show()
+                        updateTrackingUi(trackingService?.snapshot())
                     }
                 }
             } catch (error: Exception) {
@@ -854,7 +858,7 @@ class MainActivity : Activity() {
                         updateTrackingUi(trackingService?.snapshot())
                         Toast.makeText(
                             this,
-                            "Unable to save GPX: ${error.message ?: "storage error"}",
+                            "Unable to end survey: ${error.message ?: "storage error"}",
                             Toast.LENGTH_LONG,
                         ).show()
                     }
@@ -863,46 +867,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun saveTrack(points: List<TrackPoint>): GpxSaveResult {
-        val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date())
-        val filename = "g21-track-$timestamp.gpx"
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val folderUriString = prefs.getString(KEY_GPX_FOLDER_URI, null)
-            ?: throw IOException("Choose a GPX save folder before saving.")
-        val folderUri = Uri.parse(folderUriString)
-        val savedFilename = saveTrackToSelectedFolder(folderUri, filename, points)
-        val projectFolder = prefs.getString(KEY_GPX_FOLDER_LABEL, "Selected folder") ?: "Selected folder"
-        val folder = "$projectFolder/tracks"
-        return GpxSaveResult(folder, savedFilename)
-    }
-
-    private fun saveTrackToSelectedFolder(
-        treeUri: Uri,
-        filename: String,
-        points: List<TrackPoint>,
-    ): String {
-        val projectDocumentId = DocumentsContract.getTreeDocumentId(treeUri)
-        val tracksDocumentId = findOrCreateDirectory(treeUri, projectDocumentId, "tracks")
-        val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, tracksDocumentId)
-        val fileUri = DocumentsContract.createDocument(
-            contentResolver,
-            parentUri,
-            "application/gpx+xml",
-            filename,
-        ) ?: throw IOException("Android could not create the GPX file in the selected folder.")
-        try {
-            val output = contentResolver.openOutputStream(fileUri, "w")
-                ?: throw IOException("Android could not open the GPX file for writing.")
-            output.bufferedWriter(Charsets.UTF_8).use { writeGpx(it, points) }
-        } catch (error: Exception) {
-            try {
-                DocumentsContract.deleteDocument(contentResolver, fileUri)
-            } catch (cleanupError: Exception) {
-                error.addSuppressed(cleanupError)
-            }
-            throw error
-        }
-        return filename
+    private fun saveTrackToDocument(fileUri: Uri, points: List<TrackPoint>) {
+        val output = contentResolver.openOutputStream(fileUri, "wt")
+            ?: throw IOException("Android could not open the survey GPX file for writing.")
+        output.bufferedWriter(Charsets.UTF_8).use { writeGpx(it, points) }
     }
 
     private fun writeGpx(writer: java.io.BufferedWriter, points: List<TrackPoint>) {
@@ -1096,11 +1064,27 @@ class MainActivity : Activity() {
             if (rows.isEmpty()) throw IOException("shortcuts.csv is empty.")
             val codeColumn = rows.first().indexOfFirst { it.trim().equals("code", ignoreCase = true) }
             if (codeColumn < 0) throw IOException("shortcuts.csv is missing the 'code' column.")
-            val templates = rows.drop(1).mapNotNull { row ->
-                val code = row.getOrNull(codeColumn)?.trim()?.takeIf(String::isNotEmpty)
-                code?.let { ShortcutTemplate(it, row) }
+            val surveyColumn = rows.first().indexOfFirst { it.trim().equals("survey", ignoreCase = true) }
+            if (surveyColumn < 0) throw IOException("shortcuts.csv is missing the 'survey' column.")
+            val tagsRow = rows.getOrNull(1)?.takeIf {
+                it.getOrNull(codeColumn)?.trim()?.equals("tags", ignoreCase = true) == true
             }
-            val data = ShortcutData(rows.first(), codeColumn, templates)
+            val templateRows = rows.drop(if (tagsRow == null) 1 else 2)
+            val templates = templateRows.mapNotNull { row ->
+                val code = row.getOrNull(codeColumn)?.trim()?.takeIf(String::isNotEmpty)
+                code?.let {
+                    val surveyValue = row.getOrNull(surveyColumn).orEmpty().trim()
+                    val isSurveyTaxon = when {
+                        surveyValue.isEmpty() -> false
+                        surveyValue.equals("yes", ignoreCase = true) -> true
+                        else -> throw IOException(
+                            "The survey value for code '$it' must be 'yes' or blank.",
+                        )
+                    }
+                    ShortcutTemplate(it, row, isSurveyTaxon)
+                }
+            }
+            val data = ShortcutData(rows.first(), codeColumn, surveyColumn, tagsRow.orEmpty(), templates)
             val message = if (templates.isEmpty()) {
                 "No recording templates found in shortcuts.csv."
             } else {
@@ -1110,9 +1094,12 @@ class MainActivity : Activity() {
         }
 
         private fun showShortcutTemplates(result: ShortcutLoadResult) {
+            shortcutData = result.data
+            refreshSurveyTaxaGridCounts()
             recordsStatus.text = result.message
             recordsButtons.removeAllViews()
             recordTemplateButtons.clear()
+            if (currentScreen == Screen.EDIT) loadSurveyRecords()
             val data = result.data ?: return
             data.templates.forEach { template ->
                 val button = Button(this).apply {
@@ -1169,20 +1156,414 @@ class MainActivity : Activity() {
             }
         }
 
-        private fun persistRecordCodeGrids() {
-            val encoded = recordedCodeGrids.map { key ->
-                val code = Base64.encodeToString(key.code.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                "$code:${key.gridReference}"
+        private fun setRecordedCodeGrids(records: List<SurveyRecord>) {
+            recordedCodeGrids.clear()
+            records.forEach { recordedCodeGrids.add(RecordCodeGrid(it.code, it.gridReference)) }
+        }
+
+        private fun surveyTaxaSquares(
+            records: List<SurveyRecord>,
+            data: ShortcutData,
+        ): Map<GridSquare, Int> {
+            val surveyCodes = data.templates.filter { it.isSurveyTaxon }.map { it.code }.toSet()
+            return surveyTaxaGridCounts(records, surveyCodes).map { (reference, count) ->
+                BritishNationalGrid.gridSquareForReference(reference) to count
+            }.toMap()
+        }
+
+        private fun refreshSurveyTaxaGridCounts() {
+            val data = shortcutData ?: return
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val recordsValue = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)
+            val activeProject = prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null)
+            if (recordsValue == null || activeProject == null ||
+                activeProject != prefs.getString(KEY_GPX_FOLDER_URI, null)
+            ) {
+                mapView.setSurveyGridSquares(emptyMap())
+                return
+            }
+            val uri = Uri.parse(recordsValue)
+            saver.execute {
+                try {
+                    val records = readSurveyRecords(uri, data)
+                    val squares = surveyTaxaSquares(records, data)
+                    runOnUiThread {
+                        if (!isFinishing &&
+                            getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                                .getString(KEY_ACTIVE_RECORDS_URI, null) == recordsValue &&
+                            shortcutData === data
+                        ) {
+                            mapView.setSurveyGridSquares(squares)
+                        }
+                    }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        if (!isFinishing) {
+                            Toast.makeText(
+                                this,
+                                "Unable to update survey grid counts: ${error.message ?: "storage error"}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun recordHeaders(data: ShortcutData): List<String> =
+            data.headers.filterIndexed { index, _ -> index !in data.excludedColumnIndices }
+
+        private fun readRecordsText(uri: Uri): String =
+            contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText() } ?: throw IOException("Unable to read the records CSV.")
+
+        private fun writeRecordsText(uri: Uri, text: String) {
+            val output = contentResolver.openOutputStream(uri, "wt")
+                ?: throw IOException("Unable to open the records CSV for writing.")
+            output.bufferedWriter(Charsets.UTF_8).use { it.write(text) }
+        }
+
+        private fun readSurveyRecords(uri: Uri, data: ShortcutData): List<SurveyRecord> {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (prefs.getString(KEY_ACTIVE_RECORDS_URI, null) != uri.toString() ||
+                prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) != prefs.getString(KEY_GPX_FOLDER_URI, null)
+            ) {
+                throw IOException("The active survey or project folder has changed.")
+            }
+            var text = readRecordsText(uri)
+            prefs.getString(KEY_RECORDS_WRITE_JOURNAL, null)?.let { pending ->
+                val journal = JSONObject(pending)
+                if (journal.getString("uri") != uri.toString()) {
+                    throw IOException("An incomplete records update belongs to another survey.")
+                }
+                val before = journal.getString("before")
+                if (text == journal.getString("after")) {
+                    writeRecordsText(uri, before)
+                    text = before
+                } else if (text != before) {
+                    throw IOException("An interrupted update left the records CSV incomplete; a recovery copy is stored on this device.")
+                }
+                if (!prefs.edit().remove(KEY_RECORDS_WRITE_JOURNAL).commit()) {
+                    throw IOException("Unable to complete records recovery.")
+                }
+            }
+            val rows = parseCsv(text.removePrefix("\uFEFF"))
+            if (rows.firstOrNull() != recordHeaders(data)) {
+                throw IOException("The records CSV header does not match shortcuts.csv.")
+            }
+            val metadata = prefs.getString(KEY_ACTIVE_RECORDS_METADATA, null)
+                ?: throw IOException("Record code information is unavailable for this survey.")
+            val entries = JSONArray(metadata)
+            val records = (0 until entries.length()).map { index ->
+                val entry = entries.getJSONObject(index)
+                val fields = entry.getJSONArray("values")
+                SurveyRecord(
+                    entry.getString("code"),
+                    entry.getString("grid"),
+                    (0 until fields.length()).map { fields.getString(it) },
+                )
+            }
+            if (rows.drop(1) != records.map { it.values }) {
+                throw IOException("The records CSV differs from the stored survey data; recording and editing are unavailable.")
+            }
+            return records
+        }
+
+        private fun writeSurveyRecords(
+            uri: Uri,
+            data: ShortcutData,
+            oldRecords: List<SurveyRecord>,
+            newRecords: List<SurveyRecord>,
+        ) {
+            fun csv(records: List<SurveyRecord>): String =
+                (listOf(recordHeaders(data)) + records.map { it.values })
+                    .joinToString(separator = "\n", postfix = "\n") { encodeCsvRow(it) }
+            val metadata = JSONArray()
+            newRecords.forEach { record ->
+                metadata.put(JSONObject().apply {
+                    put("code", record.code)
+                    put("grid", record.gridReference)
+                    put("values", JSONArray(record.values))
+                })
+            }
+            val keys = newRecords.map {
+                val code = Base64.encodeToString(it.code.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                "$code:${it.gridReference}"
             }.toSet()
-            getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, encoded)
-                .apply()
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val oldMetadata = prefs.getString(KEY_ACTIVE_RECORDS_METADATA, null)
+            val oldKeys = prefs.getStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, emptySet())?.toSet().orEmpty()
+            val before = readRecordsText(uri)
+            if (parseCsv(before.removePrefix("\uFEFF")) != listOf(recordHeaders(data)) + oldRecords.map { it.values }) {
+                throw IOException("The records CSV changed during the update.")
+            }
+            val after = csv(newRecords)
+            val journal = JSONObject().put("uri", uri.toString()).put("before", before).put("after", after)
+            if (!prefs.edit().putString(KEY_RECORDS_WRITE_JOURNAL, journal.toString()).commit()) {
+                throw IOException("Unable to prepare a recovery copy of the records CSV.")
+            }
+            try {
+                writeRecordsText(uri, after)
+                val saved = prefs.edit()
+                    .putString(KEY_ACTIVE_RECORDS_METADATA, metadata.toString())
+                    .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, keys)
+                    .remove(KEY_RECORDS_WRITE_JOURNAL)
+                    .commit()
+                if (!saved) throw IOException("Unable to save record code information.")
+            } catch (error: Exception) {
+                try {
+                    if (!prefs.edit()
+                            .putString(KEY_ACTIVE_RECORDS_METADATA, oldMetadata)
+                            .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, oldKeys)
+                            .putString(KEY_RECORDS_WRITE_JOURNAL, journal.toString())
+                            .commit()
+                    ) throw IOException("Unable to restore record code information.")
+                    writeRecordsText(uri, before)
+                    if (!prefs.edit().remove(KEY_RECORDS_WRITE_JOURNAL).commit()) {
+                        throw IOException("Unable to complete records recovery.")
+                    }
+                } catch (restoreError: Exception) {
+                    throw IOException("Unable to save the record or restore survey data: ${restoreError.message}", error)
+                }
+                throw error
+            }
+        }
+
+        private fun editMessage(message: String) {
+            editScreen.removeAllViews()
+            editScreen.addView(TextView(this).apply {
+                text = message
+                textSize = 16f
+                setTextColor(Color.rgb(80, 88, 82))
+                setPadding(dp(20), dp(24), dp(20), dp(12))
+            })
+        }
+
+        private fun loadSurveyRecords() {
+            val request = ++editRequest
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val uri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
+            if (trackingService?.snapshot() == null || isSavingTrack || uri == null) {
+                editMessage("Start a survey to view and edit its records.")
+                return
+            }
+            editMessage("Loading records...")
+            saver.execute {
+                try {
+                    val shortcutResult = readShortcutTemplates()
+                    val data = shortcutResult.data
+                        ?: throw IOException(shortcutResult.message)
+                    val records = readSurveyRecords(uri, data)
+                    runOnUiThread {
+                        if (!isFinishing && currentScreen == Screen.EDIT && request == editRequest) {
+                            shortcutData = data
+                            setRecordedCodeGrids(records)
+                            updateRecordButtons(trackingService?.latestPosition())
+                            mapView.setSurveyGridSquares(surveyTaxaSquares(records, data))
+                            showSurveyRecords(uri, data, records)
+                        }
+                    }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        if (!isFinishing && currentScreen == Screen.EDIT && request == editRequest) {
+                            editMessage("Unable to load records: ${error.message ?: "storage error"}")
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun showSurveyRecords(uri: Uri, data: ShortcutData, records: List<SurveyRecord>) {
+            editScreen.removeAllViews()
+            if (records.isEmpty()) {
+                editMessage("No records in the current survey.")
+                return
+            }
+            val cards = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(16), dp(20), dp(16))
+            }
+            records.indices.reversed().forEach { index ->
+                val record = records[index]
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(16), dp(12), dp(16), dp(12))
+                    background = GradientDrawable().apply {
+                        setColor(Color.rgb(247, 248, 246))
+                        cornerRadius = dp(8).toFloat()
+                        setStroke(dp(1), Color.rgb(225, 228, 224))
+                    }
+                }
+                card.addView(TextView(this).apply {
+                    text = "Code: ${record.code}"
+                    textSize = 16f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(Color.rgb(32, 45, 37))
+                })
+                listOf("scientific", "time", "gr", "quantity", "site", "comment").forEach { tag ->
+                    val column = outputColumnForTag(data.tags, data.excludedColumnIndices, tag)
+                    val value = column?.let { record.values.getOrNull(it) }.orEmpty()
+                    card.addView(TextView(this).apply {
+                        text = "${tag.replaceFirstChar { it.uppercase() }}: $value"
+                        textSize = 14f
+                        setTextColor(Color.rgb(55, 65, 58))
+                    })
+                }
+                card.addView(Button(this).apply {
+                    text = "Edit"
+                    setOnClickListener { showRecordEditor(uri, data, index, record) }
+                })
+                cards.addView(card, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(12) })
+            }
+            editScreen.addView(ScrollView(this).apply { addView(cards) })
+        }
+
+        private fun showRecordEditor(uri: Uri, data: ShortcutData, index: Int, record: SurveyRecord) {
+            val templateCodes = data.templates.map { it.code }.distinct()
+            val codes = if (record.code in templateCodes) templateCodes else listOf(record.code) + templateCodes
+            ++editRequest
+            editScreen.removeAllViews()
+            val form = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(16), dp(20), dp(12))
+            }
+            fun label(text: String) = TextView(this).apply {
+                this.text = text
+                textSize = 16f
+                setTextColor(Color.rgb(55, 65, 58))
+            }
+            form.addView(label("Code"))
+            val codeInput = Spinner(this).apply {
+                adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, codes)
+                setSelection(codes.indexOf(record.code))
+            }
+            form.addView(codeInput)
+            fun textInput(tag: String, multiline: Boolean = false): EditText {
+                form.addView(label(tag.replaceFirstChar { it.uppercase() }))
+                val column = outputColumnForTag(data.tags, data.excludedColumnIndices, tag)
+                return EditText(this).apply {
+                    inputType = InputType.TYPE_CLASS_TEXT
+                    setSingleLine(!multiline)
+                    if (multiline) {
+                        minLines = 3
+                        gravity = Gravity.TOP or Gravity.START
+                    }
+                    if (column != null && column in record.values.indices) {
+                        setText(record.values[column])
+                    } else {
+                        hint = "Missing $tag tag in shortcuts.csv"
+                        isEnabled = false
+                    }
+                    form.addView(this)
+                }
+            }
+            val quantity = textInput("quantity")
+            val site = textInput("site")
+            val comment = textInput("comment", multiline = true)
+            editScreen.addView(ScrollView(this).apply { addView(form) }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f,
+            ))
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
+            val cancel = Button(this).apply {
+                text = "Cancel"
+                setOnClickListener { loadSurveyRecords() }
+            }
+            val save = Button(this).apply { text = "Save" }
+            val delete = Button(this).apply { text = "Delete" }
+            listOf(cancel, save, delete).forEach {
+                actions.addView(it, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            editScreen.addView(actions)
+            fun submit(deleting: Boolean) {
+                if (trackingService?.snapshot() == null || isSavingTrack) {
+                    Toast.makeText(this, "The survey is no longer available for editing.", Toast.LENGTH_LONG).show()
+                    loadSurveyRecords()
+                    return
+                }
+                val selectedCode = codes[codeInput.selectedItemPosition]
+                val selectedTemplates = data.templates.filter { it.code == selectedCode }
+                if (!deleting && selectedCode != record.code && selectedTemplates.size != 1) {
+                    Toast.makeText(this, "The selected code is duplicated in shortcuts.csv.", Toast.LENGTH_LONG).show()
+                    return
+                }
+                val selected = selectedTemplates.firstOrNull()
+                val changed = try {
+                    if (deleting) null else editSurveyRecord(
+                        record, selectedCode, selected?.fields.orEmpty(), data.tags, data.excludedColumnIndices,
+                        quantity.text.toString(), site.text.toString(), comment.text.toString(),
+                    )
+                } catch (error: IllegalArgumentException) {
+                    Toast.makeText(this, "Cannot save record: ${error.message}", Toast.LENGTH_LONG).show()
+                    return
+                }
+                val request = editRequest
+                cancel.isEnabled = false
+                save.isEnabled = false
+                delete.isEnabled = false
+                saver.execute {
+                    try {
+                        val records = readSurveyRecords(uri, data)
+                        val updated = replaceSurveyRecord(records, index, record, changed)
+                        writeSurveyRecords(uri, data, records, updated)
+                        runOnUiThread {
+                            if (!isFinishing) {
+                                setRecordedCodeGrids(updated)
+                                updateRecordButtons(trackingService?.latestPosition())
+                                mapView.setSurveyGridSquares(surveyTaxaSquares(updated, data))
+                                if (currentScreen == Screen.EDIT && request == editRequest) loadSurveyRecords()
+                            }
+                        }
+                    } catch (error: Exception) {
+                        runOnUiThread {
+                            if (!isFinishing) {
+                                if (error is DuplicateSurveyRecordException) {
+                                    AlertDialog.Builder(this)
+                                        .setTitle("Record already exists")
+                                        .setMessage(
+                                            "You cannot change this code because a record of this taxon has already been recorded at this location during this survey. You may want to delete this record instead.",
+                                        )
+                                        .setPositiveButton("OK") { _, _ ->
+                                            codeInput.setSelection(codes.indexOf(record.code))
+                                        }
+                                        .show()
+                                } else {
+                                    Toast.makeText(
+                                        this,
+                                        "Unable to update record: ${error.message ?: "storage error"}",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                                if (currentScreen == Screen.EDIT && request == editRequest) {
+                                    cancel.isEnabled = true
+                                    save.isEnabled = true
+                                    delete.isEnabled = true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            save.setOnClickListener { submit(false) }
+            delete.setOnClickListener {
+                AlertDialog.Builder(this)
+                    .setTitle("Delete record?")
+                    .setMessage("This will permanently remove the record from the survey.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Delete") { _, _ -> submit(true) }
+                    .show()
+            }
         }
 
         private fun onRecordTemplateClicked(data: ShortcutData, template: ShortcutTemplate) {
             val service = trackingService
             if (service?.snapshot()?.isTracking != true) {
-                Toast.makeText(this, "Start tracking before recording an observation.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Start a survey before recording an observation.", Toast.LENGTH_LONG).show()
                 return
             }
             val point = service.latestPosition()
@@ -1194,19 +1575,29 @@ class MainActivity : Activity() {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val locationName = prefs.getString(KEY_CURRENT_LOCATION_NAME, "").orEmpty().trim()
             val projectUri = prefs.getString(KEY_GPX_FOLDER_URI, null)
-            if (projectUri == null || prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) != projectUri) {
+            if (
+                projectUri == null ||
+                prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) != projectUri ||
+                prefs.getString(KEY_ACTIVE_TRACK_PROJECT_URI, null) != projectUri
+            ) {
                 Toast.makeText(
                     this,
-                    "Pause tracking and start it again to create a records file for this project folder.",
+                    "Select the project folder used when this survey started.",
                     Toast.LENGTH_LONG,
                 ).show()
                 return
             }
             val recordsUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
             if (recordsUri == null) {
-                Toast.makeText(this, "No records CSV is active. Start tracking again.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "No records CSV is active. Start a new survey.", Toast.LENGTH_LONG).show()
                 return
             }
+            val trackUri = prefs.getString(KEY_ACTIVE_TRACK_URI, null)?.let(Uri::parse)
+            if (trackUri == null) {
+                Toast.makeText(this, "No GPX track is active. Start a new survey.", Toast.LENGTH_LONG).show()
+                return
+            }
+            val trackPoints = service.trackPoints()
 
             val date = SimpleDateFormat("dd/MM/yyyy", Locale.UK).format(Date(point.timestamp))
             val includeSeconds = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -1229,29 +1620,28 @@ class MainActivity : Activity() {
             if (recordKey in recordedCodeGrids || recordKey in pendingCodeGrids) return
             pendingCodeGrids.add(recordKey)
             updateRecordButtons(point)
-            val values = data.headers.indices
-                .filter { it != data.codeColumnIndex }
-                .map { index ->
-                    template.fields.getOrElse(index) { "" }
-                        .replace("#date#", date, ignoreCase = true)
-                        .replace("#time#", time, ignoreCase = true)
-                        .replace("#gr#", gridReference, ignoreCase = true)
-                        .replace("#site#", locationName, ignoreCase = true)
-                        .replace("#comment#", "", ignoreCase = true)
-                }
+            val values = renderShortcutValues(
+                data.headers, data.excludedColumnIndices, data.tags, template.fields,
+                date, time, gridReference, locationName,
+            )
 
             saver.execute {
                 try {
-                    val output = contentResolver.openOutputStream(recordsUri, "wa")
-                        ?: throw IOException("Android could not open the records CSV for appending.")
-                    output.bufferedWriter(Charsets.UTF_8).use { it.appendLine(encodeCsvRow(values)) }
+                    saveTrackToDocument(trackUri, trackPoints)
+                    val records = readSurveyRecords(recordsUri, data)
+                    if (records.any { it.code == recordKey.code && it.gridReference == recordKey.gridReference }) {
+                        throw IOException("This code has already been recorded at this grid reference.")
+                    }
+                    val updated = records + SurveyRecord(template.code, gridReference, values)
+                    writeSurveyRecords(recordsUri, data, records, updated)
                     runOnUiThread {
                         if (!isFinishing) {
                             pendingCodeGrids.remove(recordKey)
-                            recordedCodeGrids.add(recordKey)
-                            persistRecordCodeGrids()
+                            setRecordedCodeGrids(updated)
                             updateRecordButtons(trackingService?.latestPosition())
+                            mapView.setSurveyGridSquares(surveyTaxaSquares(updated, data))
                             showRecordCreatedMessage(locationName)
+                            if (currentScreen == Screen.EDIT) loadSurveyRecords()
                         }
                     }
                 } catch (error: Exception) {
@@ -1261,7 +1651,7 @@ class MainActivity : Activity() {
                             updateRecordButtons(trackingService?.latestPosition())
                             Toast.makeText(
                                 this,
-                                "Unable to add record: ${error.message ?: "storage error"}",
+                                "Unable to save record and GPX checkpoint: ${error.message ?: "storage error"}",
                                 Toast.LENGTH_LONG,
                             ).show()
                         }
@@ -1368,21 +1758,40 @@ class MainActivity : Activity() {
             return rows
         }
 
-        private fun createRecordsFile(projectTreeUri: Uri, shortcuts: ShortcutData): Uri {
+        private fun createSurveyFiles(projectTreeUri: Uri, shortcuts: ShortcutData): SurveyFiles {
             val projectDocumentId = DocumentsContract.getTreeDocumentId(projectTreeUri)
-            val existingNames = listChildren(projectTreeUri, projectDocumentId)
+            val surveysDocumentId = findOrCreateDirectory(projectTreeUri, projectDocumentId, "surveys")
+            val existingNames = listChildren(projectTreeUri, surveysDocumentId)
                 .map { it.displayName }
                 .toSet()
             var createdAt = System.currentTimeMillis()
-            var filename = recordsFilename(createdAt)
-            while (filename in existingNames) {
+            var recordsFileName = recordsFilename(createdAt)
+            var trackFileName = trackFilename(createdAt)
+            while (recordsFileName in existingNames || trackFileName in existingNames) {
                 createdAt++
-                filename = recordsFilename(createdAt)
+                recordsFileName = recordsFilename(createdAt)
+                trackFileName = trackFilename(createdAt)
             }
 
+            val recordsUri = createRecordsFile(projectTreeUri, surveysDocumentId, shortcuts, recordsFileName)
+            try {
+                val trackUri = createTrackFile(projectTreeUri, surveysDocumentId, trackFileName)
+                return SurveyFiles(recordsUri, trackUri)
+            } catch (error: Exception) {
+                cleanupSurveyFiles(SurveyFiles(recordsUri, Uri.EMPTY), error, includeTrack = false)
+                throw error
+            }
+        }
+
+        private fun createRecordsFile(
+            projectTreeUri: Uri,
+            surveysDocumentId: String,
+            shortcuts: ShortcutData,
+            filename: String,
+        ): Uri {
             val fileUri = DocumentsContract.createDocument(
                 contentResolver,
-                DocumentsContract.buildDocumentUriUsingTree(projectTreeUri, projectDocumentId),
+                DocumentsContract.buildDocumentUriUsingTree(projectTreeUri, surveysDocumentId),
                 "text/csv",
                 filename,
             ) ?: throw IOException("Android could not create $filename.")
@@ -1390,7 +1799,7 @@ class MainActivity : Activity() {
                 val output = contentResolver.openOutputStream(fileUri, "w")
                     ?: throw IOException("Android could not open $filename for writing.")
                 val headers = shortcuts.headers.filterIndexed { index, _ ->
-                    index != shortcuts.codeColumnIndex
+                    index !in shortcuts.excludedColumnIndices
                 }
                 output.bufferedWriter(Charsets.UTF_8).use { it.appendLine(encodeCsvRow(headers)) }
             } catch (error: Exception) {
@@ -1404,8 +1813,62 @@ class MainActivity : Activity() {
             return fileUri
         }
 
+        private fun createTrackFile(
+            projectTreeUri: Uri,
+            surveysDocumentId: String,
+            filename: String,
+        ): Uri {
+            val parentUri = DocumentsContract.buildDocumentUriUsingTree(projectTreeUri, surveysDocumentId)
+            val fileUri = DocumentsContract.createDocument(
+                contentResolver,
+                parentUri,
+                "application/gpx+xml",
+                filename,
+            ) ?: throw IOException("Android could not create $filename.")
+            try {
+                val output = contentResolver.openOutputStream(fileUri, "w")
+                    ?: throw IOException("Android could not open $filename for writing.")
+                output.bufferedWriter(Charsets.UTF_8).use { writeGpx(it, emptyList()) }
+            } catch (error: Exception) {
+                try {
+                    deleteDocument(fileUri)
+                } catch (cleanupError: Exception) {
+                    error.addSuppressed(cleanupError)
+                }
+                throw error
+            }
+            return fileUri
+        }
+
+        private fun cleanupSurveyFiles(
+            files: SurveyFiles,
+            cause: Exception,
+            includeTrack: Boolean = true,
+        ) {
+            listOfNotNull(files.recordsUri, files.trackUri.takeIf { includeTrack && it != Uri.EMPTY })
+                .forEach { uri ->
+                    try {
+                        deleteDocument(uri)
+                    } catch (cleanupError: Exception) {
+                        cause.addSuppressed(cleanupError)
+                    }
+                }
+        }
+
+        private fun deleteDocument(uri: Uri) {
+            if (!DocumentsContract.deleteDocument(contentResolver, uri)) {
+                throw IOException("Android could not remove a partially created survey file.")
+            }
+        }
+
         private fun recordsFilename(timestamp: Long): String =
-            "records-${SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date(timestamp))}.csv"
+            "g21s-${surveyTimestamp(timestamp)}-records.csv"
+
+        private fun trackFilename(timestamp: Long): String =
+            "g21s-${surveyTimestamp(timestamp)}-track.gpx"
+
+        private fun surveyTimestamp(timestamp: Long): String =
+            SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date(timestamp))
 
         private fun encodeCsvRow(values: List<String>): String =
             values.joinToString(",") { value ->
@@ -1505,7 +1968,7 @@ class MainActivity : Activity() {
                 if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
                     startLocationUpdates()
                     if (pendingTrackStart) {
-                        requestNotificationPermissionOrChooseTrack(trackingService?.snapshot())
+                        requestNotificationPermissionOrStartSurvey()
                     }
                 } else {
                     pendingTrackStart = false
@@ -1521,7 +1984,7 @@ class MainActivity : Activity() {
                         Toast.LENGTH_LONG,
                     ).show()
                 }
-                chooseTrackAction(trackingService?.snapshot())
+                requestTrackingService()
             }
         }
     }
@@ -1576,6 +2039,10 @@ class MainActivity : Activity() {
         const val KEY_ACTIVE_RECORDS_PROJECT_URI = "active_records_project_uri"
         const val KEY_ACTIVE_RECORDS_INDEX_URI = "active_records_index_uri"
         const val KEY_ACTIVE_RECORDS_CODE_GRIDS = "active_records_code_grids"
+        const val KEY_ACTIVE_RECORDS_METADATA = "active_records_metadata"
+        const val KEY_RECORDS_WRITE_JOURNAL = "records_write_journal"
+        const val KEY_ACTIVE_TRACK_URI = "active_track_uri"
+        const val KEY_ACTIVE_TRACK_PROJECT_URI = "active_track_project_uri"
         const val KEY_GRID_REFERENCE_PRECISION = "grid_reference_precision"
         const val KEY_RECORD_TIME_SECONDS = "record_time_seconds"
         const val KEY_CURRENT_LOCATION_NAME = "current_location_name"
@@ -1594,6 +2061,7 @@ class MainActivity : Activity() {
         TRACKING,
         SETTINGS,
         RECORDS,
+        EDIT,
     }
 
     override fun onDestroy() {
@@ -1609,8 +2077,9 @@ private class NavigationItem(
     private val tracking: Boolean,
     private val settings: Boolean = false,
     private val records: Boolean = false,
+    private val edit: Boolean = false,
 ) : LinearLayout(context) {
-    private val icon = NavigationIcon(context, tracking, settings, records)
+    private val icon = NavigationIcon(context, tracking, settings, records, edit)
     private val title = TextView(context).apply {
         text = label
         textSize = 12f
@@ -1646,6 +2115,7 @@ private class NavigationIcon(
     private val tracking: Boolean,
     private val settings: Boolean,
     private val records: Boolean,
+    private val edit: Boolean,
 ) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -1690,6 +2160,10 @@ private class NavigationIcon(
                 val endY = cy + kotlin.math.sin(angle).toFloat() * outerRadius
                 canvas.drawLine(startX, startY, endX, endY, paint)
             }
+        } else if (edit) {
+            canvas.drawLine(cx - 7f * scale, cy + 7f * scale, cx + 6f * scale, cy - 6f * scale, paint)
+            canvas.drawLine(cx - 7f * scale, cy + 7f * scale, cx - 3f * scale, cy + 6f * scale, paint)
+            canvas.drawLine(cx + 6f * scale, cy - 6f * scale, cx + 8f * scale, cy - 4f * scale, paint)
         } else if (records) {
             for (index in -1..1) {
                 val y = cy + index * 6f * scale
@@ -1745,6 +2219,23 @@ private class RasterMapView(context: android.content.Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
+    private val surveySquareBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        style = Paint.Style.STROKE
+        strokeWidth = 2f * resources.displayMetrics.density
+    }
+    private val surveyCountHalo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 3f * resources.displayMetrics.density
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val surveyCountText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
     private val accuracyFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(40, 25, 118, 210) }
     private val density = resources.displayMetrics.density
     private val buttonFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
@@ -1778,6 +2269,7 @@ private class RasterMapView(context: android.content.Context) : View(context) {
     private var trackingFlashVisible = false
     private var flashRed = false
     private val trackPoints = mutableListOf<TrackPoint>()
+    private var surveyGridSquares: Map<GridSquare, Int> = emptyMap()
     private val tiles = mutableListOf<RasterTile>()
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -1923,6 +2415,11 @@ private class RasterMapView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
+    fun setSurveyGridSquares(squares: Map<GridSquare, Int>) {
+        surveyGridSquares = squares.toMap()
+        invalidate()
+    }
+
     fun appendTrackPoint(point: TrackPoint) {
         trackPoints.add(point)
         invalidate()
@@ -2025,6 +2522,24 @@ private class RasterMapView(context: android.content.Context) : View(context) {
                 canvas.drawCircle(x, y, 4f * density, trackUnderlay)
                 canvas.drawCircle(x, y, 2.5f * density, trackPaint)
             }
+        }
+
+        surveyGridSquares.forEach { (square, count) ->
+            val left = offsetX + square.easting.toFloat() * mapScale
+            val right = offsetX + (square.easting + square.sizeMetres).toFloat() * mapScale
+            val top = offsetY - (square.northing + square.sizeMetres).toFloat() * mapScale
+            val bottom = offsetY - square.northing.toFloat() * mapScale
+            if (right < 0f || left > width || bottom < 0f || top > height) return@forEach
+            canvas.drawRect(left, top, right, bottom, surveySquareBorder)
+            val centerX = (left + right) / 2f
+            val centerY = (top + bottom) / 2f
+            val textSize = minOf(14f * density, maxOf(8f * density, (bottom - top) * 0.65f))
+            surveyCountHalo.textSize = textSize
+            surveyCountText.textSize = textSize
+            val baseline = centerY - (surveyCountText.ascent() + surveyCountText.descent()) / 2f
+            val label = count.toString()
+            canvas.drawText(label, centerX, baseline, surveyCountHalo)
+            canvas.drawText(label, centerX, baseline, surveyCountText)
         }
 
         val easting = positionX

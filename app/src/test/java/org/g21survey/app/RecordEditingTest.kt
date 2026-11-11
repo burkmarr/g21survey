@@ -1,0 +1,160 @@
+package org.g21survey.app
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+class RecordEditingTest {
+    private val tags = listOf("scientific", "time", "tags", "gr", "vernacular", "quantity", "site", "comment")
+    private val record = SurveyRecord(
+        "old", "SD1234",
+        listOf("Old species", "10:32", "SD1234", "Old common", "2", "Old site", "a, \"note\""),
+    )
+    private val template = listOf("New species", "", "new", "", "New common", "100", "Template site", "")
+
+    @Test
+    fun `tag positions account for removed code column`() {
+        val excludedColumns = setOf(2)
+        assertEquals(0, outputColumnForTag(tags, excludedColumns, "SCIENTIFIC"))
+        assertEquals(2, outputColumnForTag(tags, excludedColumns, "gr"))
+        assertEquals(4, outputColumnForTag(tags, excludedColumns, "quantity"))
+        assertEquals(null, outputColumnForTag(tags, excludedColumns, "tags"))
+        assertEquals(null, outputColumnForTag(tags, excludedColumns, "missing"))
+    }
+
+    @Test
+    fun `example shortcuts tags map to corresponding records columns`() {
+        val exampleTags = listOf(
+            "tags", "", "", "", "date", "time", "scientific", "vernacular",
+            "", "", "", "quantity", "gr", "site", "comment",
+        )
+        val excludedColumns = setOf(0, 1)
+        assertEquals(4, outputColumnForTag(exampleTags, excludedColumns, "scientific"))
+        assertEquals(3, outputColumnForTag(exampleTags, excludedColumns, "time"))
+        assertEquals(10, outputColumnForTag(exampleTags, excludedColumns, "gr"))
+        assertEquals(9, outputColumnForTag(exampleTags, excludedColumns, "quantity"))
+        assertEquals(12, outputColumnForTag(exampleTags, excludedColumns, "comment"))
+    }
+
+    @Test
+    fun `survey grid references decode to cells at their precision`() {
+        listOf(8, 10).forEach { precision ->
+            val reference = BritishNationalGrid.toGridReference(352123.0, 518456.0, precision)
+            val sixFigureReference = BritishNationalGrid.toSixFigureGridReference(reference)
+            val square = BritishNationalGrid.gridSquareForReference(sixFigureReference)
+            assertEquals(100.0, square.sizeMetres, 0.0)
+            assertEquals(8, sixFigureReference.length)
+            assertEquals(
+                sixFigureReference,
+                BritishNationalGrid.toSixFigureGridReference(
+                    BritishNationalGrid.toGridReference(
+                        square.easting + square.sizeMetres / 2.0,
+                        square.northing + square.sizeMetres / 2.0,
+                        8,
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `survey grid counts include only marked survey taxa`() {
+        val tenFigureRef = BritishNationalGrid.toGridReference(352123.0, 518456.0, 10)
+        val eightFigureRef = BritishNationalGrid.toGridReference(352129.0, 518459.0, 8)
+        val otherSquareRef = BritishNationalGrid.toGridReference(352250.0, 518550.0, 10)
+        val records = listOf(
+            record.copy(code = "survey-a", gridReference = tenFigureRef),
+            record.copy(code = "survey-b", gridReference = eightFigureRef),
+            record.copy(code = "survey-a", gridReference = otherSquareRef),
+            record.copy(code = "ordinary", gridReference = tenFigureRef),
+        )
+        assertEquals(
+            mapOf(
+                BritishNationalGrid.toSixFigureGridReference(tenFigureRef) to 2,
+                BritishNationalGrid.toSixFigureGridReference(otherSquareRef) to 1,
+            ),
+            surveyTaxaGridCounts(records, setOf("survey-a", "survey-b")),
+        )
+    }
+
+    @Test
+    fun `recording fills blank tagged fields and preserves literal and inline values`() {
+        val headers = listOf("code", "date", "time", "grid", "site", "scientific", "comment", "extra")
+        val tags = listOf("tags", "date", "time", "gr", "site", "scientific", "comment", "")
+        val fields = listOf("ABC", "", "fixed time", "", "", "Species", "", "Grid #GR#")
+        assertEquals(
+            listOf("01/01/2026", "fixed time", "SD1234", "Place", "Species", "", "Grid SD1234"),
+            renderShortcutValues(headers, setOf(0), tags, fields, "01/01/2026", "10:32", "SD1234", "Place"),
+        )
+    }
+
+    @Test
+    fun `code and survey columns are both omitted from generated values`() {
+        val headers = listOf("code", "survey", "species", "quantity")
+        val fields = listOf("ABC", "yes", "Species", "2")
+        assertEquals(
+            listOf("Species", "2"),
+            renderShortcutValues(
+                headers,
+                setOf(0, 1),
+                listOf("tags", "", "scientific", "quantity"),
+                fields,
+                "01/01/2026",
+                "10:32",
+                "SD1234",
+                "Place",
+            ),
+        )
+    }
+
+    @Test
+    fun `changing code updates scientific vernacular quantity site and comment`() {
+        val edited = editSurveyRecord(record, "new", template, tags, setOf(2), "3", "New site", "Updated note")
+        assertEquals("new", edited.code)
+        assertEquals("SD1234", edited.gridReference)
+        assertEquals(
+            listOf("New species", "10:32", "SD1234", "New common", "3", "New site", "Updated note"),
+            edited.values,
+        )
+    }
+
+    @Test
+    fun `keeping code preserves scientific and vernacular values`() {
+        val edited = editSurveyRecord(record, "old", template, tags, setOf(2), "", "", "Updated note")
+        assertEquals(listOf("Old species", "10:32", "SD1234", "Old common", "", "", "Updated note"), edited.values)
+    }
+
+    @Test
+    fun `missing required tag fails instead of editing wrong field`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            editSurveyRecord(record, "new", template, tags.map { if (it == "site") "" else it }, setOf(2), "", "", "")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            editSurveyRecord(record, "old", template, tags.map { if (it == "comment") "" else it }, setOf(2), "", "", "")
+        }
+    }
+
+    @Test
+    fun `delete and replacement preserve other records and reject stale edits`() {
+        val other = record.copy(code = "other", gridReference = "SD5678")
+        val records = listOf(record, other)
+        assertEquals(listOf(other), replaceSurveyRecord(records, 0, record, null))
+        val edited = record.copy(code = "new")
+        assertEquals(listOf(edited, other), replaceSurveyRecord(records, 0, record, edited))
+        assertThrows(IllegalArgumentException::class.java) {
+            replaceSurveyRecord(records, 1, record, null)
+        }
+    }
+
+    @Test
+    fun `changing to an existing code at same grid is rejected`() {
+        val other = record.copy(code = "other")
+        assertThrows(DuplicateSurveyRecordException::class.java) {
+            replaceSurveyRecord(listOf(record, other), 0, record, record.copy(code = "other"))
+        }
+        assertEquals(
+            2,
+            replaceSurveyRecord(listOf(record, other.copy(gridReference = "SD5678")), 0, record, record.copy(code = "other")).size,
+        )
+    }
+}

@@ -132,8 +132,7 @@ class TrackingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START_NEW -> startNewTrack()
-            ACTION_CONTINUE -> continueTrack()
+            ACTION_START_SURVEY -> startSurvey()
         }
         return START_NOT_STICKY
     }
@@ -163,7 +162,7 @@ class TrackingService : Service() {
         movementThresholdMeters = metres
     }
 
-    fun pauseTrack() {
+    fun stopTrack() {
         if (!tracking) return
         tracking = false
         trackingError = null
@@ -180,7 +179,7 @@ class TrackingService : Service() {
         return true
     }
 
-    private fun startNewTrack() {
+    private fun startSurvey() {
         if (tracking) {
             locationManager.removeUpdates(locationListener)
             tracking = false
@@ -189,15 +188,6 @@ class TrackingService : Service() {
         session = TrackSession(System.currentTimeMillis())
         trackingError = null
         beginTracking(trackReplaced = true)
-    }
-
-    private fun continueTrack() {
-        if (session == null) {
-            startNewTrack()
-            return
-        }
-        trackingError = null
-        beginTracking()
     }
 
     @SuppressLint("MissingPermission")
@@ -298,8 +288,7 @@ class TrackingService : Service() {
     }
 
     companion object {
-        const val ACTION_START_NEW = "org.g21survey.app.action.START_NEW_TRACK"
-        const val ACTION_CONTINUE = "org.g21survey.app.action.CONTINUE_TRACK"
+        const val ACTION_START_SURVEY = "org.g21survey.app.action.START_SURVEY"
         private const val DEFAULT_MOVEMENT_THRESHOLD_METRES = 5
         private const val MIN_MOVEMENT_THRESHOLD_METRES = 1
         private const val MAX_MOVEMENT_THRESHOLD_METRES = 20

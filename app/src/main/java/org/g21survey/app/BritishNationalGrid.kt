@@ -11,6 +11,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
+internal data class GridSquare(val easting: Double, val northing: Double, val sizeMetres: Double)
+
 object BritishNationalGrid {
     private const val GRID_ASSET_NAME = "ostn15-etrs-to-osgb.bin"
     private const val GRID_ROWS = 1441
@@ -140,6 +142,63 @@ object BritishNationalGrid {
             "The GPS position is outside the British National Grid."
         }
 
+        val letters = gridLetters(east100k, north100k)
+        val figuresPerCoordinate = figures / 2
+        val divisor = 10.0.pow(5 - figuresPerCoordinate).toLong()
+        val eastingDigits = floor(easting).toLong() % 100_000L / divisor
+        val northingDigits = floor(northing).toLong() % 100_000L / divisor
+        return String.format(
+            java.util.Locale.UK,
+            "%s%0${figuresPerCoordinate}d%0${figuresPerCoordinate}d",
+            letters,
+            eastingDigits,
+            northingDigits,
+        )
+    }
+
+    internal fun toSixFigureGridReference(gridReference: String): String {
+        val normalized = gridReference.filterNot(Char::isWhitespace).uppercase(java.util.Locale.UK)
+        require(normalized.length == 8 || normalized.length == 10 || normalized.length == 12) {
+            "Grid reference must contain 6, 8 or 10 figures."
+        }
+        val letters = normalized.substring(0, 2)
+        val digits = normalized.substring(2)
+        require(digits.all { it in '0'..'9' }) { "Grid reference contains invalid digits." }
+        val figuresPerCoordinate = digits.length / 2
+        find100kSquare(letters)
+        require(figuresPerCoordinate in 3..5) { "Grid reference has invalid precision." }
+        val eastDigits = digits.substring(0, figuresPerCoordinate)
+        val northDigits = digits.substring(figuresPerCoordinate)
+        return letters + eastDigits.take(3) + northDigits.take(3)
+    }
+
+    internal fun gridSquareForReference(gridReference: String): GridSquare {
+        val normalized = gridReference.filterNot(Char::isWhitespace).uppercase(java.util.Locale.UK)
+        require(normalized.length == 8 || normalized.length == 10 || normalized.length == 12) {
+            "Grid reference must contain 6, 8 or 10 figures."
+        }
+        val letters = normalized.substring(0, 2)
+        val digits = normalized.substring(2)
+        require(digits.all { it in '0'..'9' }) { "Grid reference contains invalid digits." }
+        val figuresPerCoordinate = digits.length / 2
+        val square = find100kSquare(letters)
+        val size = 10.0.pow(5 - figuresPerCoordinate)
+        val eastingDigits = digits.substring(0, figuresPerCoordinate).toLong()
+        val northingDigits = digits.substring(figuresPerCoordinate).toLong()
+        return GridSquare(
+            square.first * 100_000.0 + eastingDigits * size,
+            square.second * 100_000.0 + northingDigits * size,
+            size,
+        )
+    }
+
+    private fun find100kSquare(letters: String): Pair<Int, Int> =
+        (0..12).asSequence().flatMap { north ->
+            (0..6).asSequence().map { east -> east to north }
+        }.firstOrNull { (east, north) -> gridLetters(east, north) == letters }
+            ?: throw IllegalArgumentException("Grid reference has invalid grid letters.")
+
+    private fun gridLetters(east100k: Int, north100k: Int): String {
         var firstLetter = 19 - north100k - (19 - north100k) % 5 + (east100k + 10) / 5
         var secondLetter = (19 - north100k) * 5 % 25 + east100k % 5
         if (firstLetter > 7) firstLetter++
@@ -147,18 +206,6 @@ object BritishNationalGrid {
         require(firstLetter in 0..25 && secondLetter in 0..25) {
             "The GPS position is outside the British National Grid."
         }
-
-        val figuresPerCoordinate = figures / 2
-        val divisor = 10.0.pow(5 - figuresPerCoordinate).toLong()
-        val eastingDigits = floor(easting).toLong() % 100_000L / divisor
-        val northingDigits = floor(northing).toLong() % 100_000L / divisor
-        return String.format(
-            java.util.Locale.UK,
-            "%c%c%0${figuresPerCoordinate}d%0${figuresPerCoordinate}d",
-            'A' + firstLetter,
-            'A' + secondLetter,
-            eastingDigits,
-            northingDigits,
-        )
+        return "${'A' + firstLetter}${'A' + secondLetter}"
     }
 }
