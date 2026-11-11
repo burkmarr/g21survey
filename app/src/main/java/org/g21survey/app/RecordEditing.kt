@@ -117,3 +117,8 @@ internal fun appendRecognizedSpeech(comment: String, recognizedText: String): St
     val separator = if (comment.isEmpty() || comment.last().isWhitespace()) "" else " "
     return comment + separator + spoken
 }
+
+internal fun isIntegerQuantity(value: String): Boolean {
+    val trimmed = value.trim()
+    return trimmed.isNotEmpty() && trimmed.all { it in '0'..'9' }
+}

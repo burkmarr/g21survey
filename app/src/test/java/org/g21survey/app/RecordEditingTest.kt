@@ -85,6 +85,15 @@ class RecordEditingTest {
     }
 
     @Test
+    fun `integer quantities allow numeric mode but words and decimals do not`() {
+        assertEquals(true, isIntegerQuantity("1"))
+        assertEquals(true, isIntegerQuantity(" 10 "))
+        assertEquals(false, isIntegerQuantity("Present"))
+        assertEquals(false, isIntegerQuantity("1.5"))
+        assertEquals(false, isIntegerQuantity(""))
+    }
+
+    @Test
     fun `recording fills blank tagged fields and preserves literal and inline values`() {
         val headers = listOf("code", "date", "time", "grid", "site", "scientific", "comment", "extra")
         val tags = listOf("tags", "date", "time", "gr", "site", "scientific", "comment", "")

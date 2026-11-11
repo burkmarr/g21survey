@@ -1547,11 +1547,15 @@ class MainActivity : Activity() {
                 tag: String,
                 multiline: Boolean = false,
                 speechInput: Boolean = false,
+                headerAccessory: View? = null,
+                inputTypeOverride: Int? = null,
             ): EditText {
                 val column = outputColumnForTag(data.tags, data.excludedColumnIndices, tag)
                 val input = EditText(this).apply {
-                    inputType = InputType.TYPE_CLASS_TEXT or
-                        if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0
+                    inputType = inputTypeOverride ?: (
+                        InputType.TYPE_CLASS_TEXT or
+                            if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0
+                        )
                     setSingleLine(!multiline)
                     if (multiline) {
                         minLines = 4
@@ -1571,7 +1575,7 @@ class MainActivity : Activity() {
                 val field = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                 }
-                if (speechInput) {
+                if (speechInput || headerAccessory != null) {
                     val heading = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
@@ -1579,11 +1583,12 @@ class MainActivity : Activity() {
                             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                                 bottomMargin = dp(6)
                             })
-                        addView(Button(this@MainActivity).apply {
+                        val accessory = headerAccessory ?: Button(this@MainActivity).apply {
                             text = "Speak"
                             isEnabled = input.isEnabled
                             setOnClickListener { requestCommentSpeech(input) }
-                        }, LinearLayout.LayoutParams(
+                        }
+                        addView(accessory, LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.WRAP_CONTENT,
                             LinearLayout.LayoutParams.WRAP_CONTENT,
                         ).apply { bottomMargin = dp(4) })
@@ -1603,7 +1608,35 @@ class MainActivity : Activity() {
                 ).apply { bottomMargin = dp(14) })
                 return input
             }
-            val quantity = textInput("quantity")
+            val quantityColumn = outputColumnForTag(data.tags, data.excludedColumnIndices, "quantity")
+            val quantityValue = quantityColumn?.let { record.values.getOrNull(it) }.orEmpty()
+            val useTextQuantity = CheckBox(this).apply {
+                text = "Use text"
+                isChecked = quantityValue.isNotBlank() && !isIntegerQuantity(quantityValue)
+                contentDescription = "Use text input for quantity"
+            }
+            val quantity = textInput(
+                "quantity",
+                headerAccessory = useTextQuantity,
+                inputTypeOverride = if (useTextQuantity.isChecked) {
+                    InputType.TYPE_CLASS_TEXT
+                } else {
+                    InputType.TYPE_CLASS_NUMBER
+                },
+            )
+            var clearInitialQuantityOnTap = isIntegerQuantity(quantityValue)
+            quantity.setOnTouchListener { _, event ->
+                if (event.action == MotionEvent.ACTION_DOWN && clearInitialQuantityOnTap) {
+                    clearInitialQuantityOnTap = false
+                    quantity.text.clear()
+                }
+                false
+            }
+            useTextQuantity.setOnCheckedChangeListener { _, useText ->
+                val selection = quantity.selectionStart.coerceAtLeast(0)
+                quantity.inputType = if (useText) InputType.TYPE_CLASS_TEXT else InputType.TYPE_CLASS_NUMBER
+                quantity.setSelection(selection.coerceAtMost(quantity.text.length))
+            }
             val site = textInput("site")
             val comment = textInput("comment", multiline = true, speechInput = true)
             speechCommentInput = comment
@@ -1653,10 +1686,22 @@ class MainActivity : Activity() {
                     return
                 }
                 val selected = selectedTemplates.firstOrNull()
+                val quantityValueToSave = quantity.text.toString()
+                if (!useTextQuantity.isChecked &&
+                    quantityValueToSave.isNotBlank() &&
+                    !isIntegerQuantity(quantityValueToSave)
+                ) {
+                    Toast.makeText(
+                        this,
+                        "Enter a whole-number quantity or select Use text.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    return
+                }
                 val changed = try {
                     if (deleting) null else editSurveyRecord(
                         record, selectedCode, selected?.fields.orEmpty(), data.tags, data.excludedColumnIndices,
-                        quantity.text.toString(), site.text.toString(), comment.text.toString(),
+                        quantityValueToSave, site.text.toString(), comment.text.toString(),
                     )
                 } catch (error: IllegalArgumentException) {
                     Toast.makeText(this, "Cannot save record: ${error.message}", Toast.LENGTH_LONG).show()
