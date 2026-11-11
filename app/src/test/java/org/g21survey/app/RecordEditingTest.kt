@@ -78,6 +78,27 @@ class RecordEditingTest {
     }
 
     @Test
+    fun `tracked grid squares appear with zero until survey taxa are recorded`() {
+        val trackedReference = BritishNationalGrid.toSixFigureGridReference(
+            BritishNationalGrid.toGridReference(352123.0, 518456.0, 8),
+        )
+        val recordedReference = BritishNationalGrid.toSixFigureGridReference(
+            BritishNationalGrid.toGridReference(352250.0, 518550.0, 10),
+        )
+        val recordedSquare = BritishNationalGrid.gridSquareForReference(recordedReference)
+        assertEquals(
+            mapOf(
+                BritishNationalGrid.gridSquareForReference(trackedReference) to 0,
+                recordedSquare to 2,
+            ),
+            mergeSurveyTrackSquares(
+                mapOf(recordedSquare to 2),
+                setOf(trackedReference, recordedReference),
+            ),
+        )
+    }
+
+    @Test
     fun `recognized comments append without replacing existing text`() {
         assertEquals("Existing note Spoken words", appendRecognizedSpeech("Existing note", " Spoken words "))
         assertEquals("Spoken words", appendRecognizedSpeech("", "Spoken words"))
@@ -102,6 +123,97 @@ class RecordEditingTest {
             listOf("01/01/2026", "fixed time", "SD1234", "Place", "Species", "", "Grid SD1234"),
             renderShortcutValues(headers, setOf(0), tags, fields, "01/01/2026", "10:32", "SD1234", "Place"),
         )
+    }
+
+    @Test
+    fun `special record values override only scientific and comment tags`() {
+        val headers = listOf("code", "scientific", "comment", "quantity")
+        val tags = listOf("tags", "scientific", "comment", "quantity")
+        assertEquals(
+            listOf("#123 bag", "Found in wetland", "2"),
+            renderShortcutValues(
+                headers,
+                setOf(0),
+                tags,
+                listOf("#", "Generic specimen", "Template note", "2"),
+                "01/01/2026",
+                "10:32",
+                "SD1234",
+                "Place",
+                comment = "Found in wetland",
+                scientific = "#123 bag",
+            ),
+        )
+        assertEquals(
+            listOf("#123 #date#", "", "2"),
+            renderShortcutValues(
+                headers,
+                setOf(0),
+                tags,
+                listOf("#", "Generic specimen", "", "2"),
+                "01/01/2026",
+                "10:32",
+                "SD1234",
+                "Place",
+                scientific = "#123 #date#",
+            ),
+        )
+    }
+
+    @Test
+    fun `special record references are unique without regard to case`() {
+        val specimenRecord = record.copy(customReferenceCode = "A12")
+        assertEquals(true, isSpecimenReferenceUsed(listOf(specimenRecord), " a12 "))
+        assertEquals(false, isSpecimenReferenceUsed(listOf(specimenRecord), "B12"))
+    }
+
+    @Test
+    fun `special record label is displayed instead of the template code`() {
+        assertEquals(
+            "#A12 bag",
+            displayCodeForRecord(record.copy(customReferenceCode = "A12", customButtonCode = "bag")),
+        )
+        assertEquals(
+            "#A12 bag",
+            displayCodeForRecord(record.copy(code = "#", identityCode = "#A12 bag")),
+        )
+        assertEquals("old", displayCodeForRecord(record))
+    }
+
+    @Test
+    fun `special record scientific label is applied to its initial record`() {
+        val source = SurveyRecord(
+            "#",
+            "SD1234",
+            listOf("Generic specimen", "initial note"),
+            customReferenceCode = "A12",
+            customButtonCode = "bag",
+        )
+        val updated = applyCustomScientificLabels(
+            listOf(source),
+            listOf("scientific", "comment"),
+            emptySet(),
+        ).single()
+        assertEquals(
+            listOf("#A12 bag", "initial note"),
+            updated.values,
+        )
+        assertEquals("initial note", updated.customButtonComment)
+    }
+
+    @Test
+    fun `special records use their button label for grid duplicate identity`() {
+        val specimenA = record.copy(identityCode = "#1 bag")
+        val specimenB = record.copy(code = "other")
+        val specimenC = record.copy(identityCode = "#2 bag")
+        assertEquals(
+            listOf(specimenC, specimenB),
+            replaceSurveyRecord(listOf(specimenA, specimenB), 0, specimenA, specimenC),
+        )
+        assertThrows(DuplicateSurveyRecordException::class.java) {
+            replaceSurveyRecord(listOf(specimenA, specimenB), 1, specimenB, specimenA.copy(code = "other"))
+        }
+        assertEquals("#1 bag", SpecialRecordButton("1", "bag").label)
     }
 
     @Test

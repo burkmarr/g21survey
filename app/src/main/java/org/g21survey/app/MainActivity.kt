@@ -78,6 +78,12 @@ private data class RasterTile(
 private data class SurveyFiles(val recordsUri: Uri, val trackUri: Uri)
 private data class ShortcutTemplate(val code: String, val fields: List<String>, val isSurveyTaxon: Boolean)
 private data class RecordCodeGrid(val code: String, val gridReference: String)
+private data class RecordTemplateButton(
+    val template: ShortcutTemplate,
+    val button: Button,
+    val identityCode: String = template.code,
+    val rootView: View = button,
+)
 private data class ShortcutData(
     val headers: List<String>,
     val codeColumnIndex: Int,
@@ -99,6 +105,7 @@ class MainActivity : Activity() {
     private lateinit var trackingScreen: View
     private lateinit var settingsScreen: View
     private lateinit var recordsScreen: View
+    private lateinit var specialRecordScreen: LinearLayout
     private lateinit var editScreen: LinearLayout
     private lateinit var trackingButton: Button
     private lateinit var trackingSaveButton: Button
@@ -114,9 +121,12 @@ class MainActivity : Activity() {
     private lateinit var editNavigationItem: NavigationItem
     private lateinit var recordsStatus: TextView
     private lateinit var recordsButtons: LinearLayout
-    private val recordTemplateButtons = mutableListOf<Pair<ShortcutTemplate, Button>>()
+    private val recordTemplateButtons = mutableListOf<RecordTemplateButton>()
+    private val customRecordTemplateButtons = mutableListOf<RecordTemplateButton>()
     private val recordedCodeGrids = mutableSetOf<RecordCodeGrid>()
     private val pendingCodeGrids = mutableSetOf<RecordCodeGrid>()
+    private val trackedGridReferences = mutableSetOf<String>()
+    private var recordSurveyGridSquares: Map<GridSquare, Int> = emptyMap()
     private var listening = false
     private var trackingService: TrackingService? = null
     private var serviceBound = false
@@ -149,6 +159,7 @@ class MainActivity : Activity() {
                             currentPosition.accuracyMeters,
                         )
                         updateRecordButtons(currentPosition)
+                        addTrackedGridReferences(listOf(currentPosition))
                     }
                     if (snapshot?.isTracking == true) {
                         stopLocationUpdates()
@@ -171,6 +182,7 @@ class MainActivity : Activity() {
             mapView.setTrackingActive(snapshot?.isTracking == true)
             val points = service.trackPoints()
             mapView.setTrack(points)
+            addTrackedGridReferences(points + listOfNotNull(service.latestPosition()))
             (service.latestPosition() ?: points.lastOrNull())?.let {
                 mapView.setPosition(it.easting, it.northing, it.accuracyMeters)
                 updateRecordButtons(it)
@@ -268,6 +280,18 @@ class MainActivity : Activity() {
             ),
         )
         recordsScreen.visibility = View.GONE
+        specialRecordScreen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            visibility = View.GONE
+        }
+        content.addView(
+            specialRecordScreen,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
         editScreen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(
             editScreen,
@@ -333,6 +357,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
         restoreRecordCodeGrids()
+        restoreTrackedGridReferences()
         mapView.restoreView(readSavedView())
         loadBasemap()
         loadShortcuts()
@@ -361,6 +386,7 @@ class MainActivity : Activity() {
         trackingScreen.visibility = if (isTracking) View.VISIBLE else View.GONE
         settingsScreen.visibility = if (isSettings) View.VISIBLE else View.GONE
         recordsScreen.visibility = if (screen == Screen.RECORDS) View.VISIBLE else View.GONE
+        specialRecordScreen.visibility = View.GONE
         editScreen.visibility = if (screen == Screen.EDIT) View.VISIBLE else View.GONE
         mapNavigationItem.setItemSelected(isMap)
         trackingNavigationItem.setItemSelected(isTracking)
@@ -676,6 +702,7 @@ class MainActivity : Activity() {
                     .putString(KEY_ACTIVE_RECORDS_INDEX_URI, files.recordsUri.toString())
                     .putStringSet(KEY_ACTIVE_RECORDS_CODE_GRIDS, emptySet())
                     .putString(KEY_ACTIVE_RECORDS_METADATA, "[]")
+                    .putStringSet(KEY_ACTIVE_TRACKED_GRID_REFERENCES, emptySet())
                     .putString(KEY_ACTIVE_TRACK_URI, files.trackUri.toString())
                     .putString(KEY_ACTIVE_TRACK_PROJECT_URI, projectFolder)
                     .commit()
@@ -690,7 +717,9 @@ class MainActivity : Activity() {
                         showShortcutTemplates(shortcutResult)
                         recordedCodeGrids.clear()
                         pendingCodeGrids.clear()
-                        mapView.setSurveyGridSquares(emptyMap())
+                        trackedGridReferences.clear()
+                        recordSurveyGridSquares = emptyMap()
+                        updateSurveyGridOverlay()
                         updateRecordButtons(trackingService?.latestPosition())
                         updateTrackingUi(trackingService?.snapshot())
                         startTrackingService(TrackingService.ACTION_START_SURVEY)
@@ -1134,14 +1163,60 @@ class MainActivity : Activity() {
             recordsStatus.text = result.message
             recordsButtons.removeAllViews()
             recordTemplateButtons.clear()
+            customRecordTemplateButtons.clear()
             if (currentScreen == Screen.EDIT) loadSurveyRecords()
             val data = result.data ?: return
-            data.templates.forEach { template ->
+            val regularTemplates = data.templates.filter { it.code != "#" }
+            regularTemplates.chunked(3).forEach { rowTemplates ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                rowTemplates.forEach { template ->
+                    val button = Button(this).apply {
+                        text = template.code
+                        textSize = 13f
+                        maxLines = 2
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        minWidth = 0
+                        minHeight = dp(48)
+                        setPadding(dp(4), dp(6), dp(4), dp(6))
+                        setOnClickListener { onRecordTemplateClicked(data, template) }
+                    }
+                    recordTemplateButtons.add(RecordTemplateButton(template, button))
+                    row.addView(button, LinearLayout.LayoutParams(
+                        0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1f,
+                    ).apply {
+                        marginStart = dp(3)
+                        marginEnd = dp(3)
+                    })
+                }
+                repeat(3 - rowTemplates.size) {
+                    row.addView(View(this), LinearLayout.LayoutParams(
+                        0,
+                        dp(48),
+                        1f,
+                    ).apply {
+                        marginStart = dp(3)
+                        marginEnd = dp(3)
+                    })
+                }
+                recordsButtons.addView(
+                    row,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply { topMargin = dp(4) },
+                )
+            }
+            data.templates.filter { it.code == "#" }.forEach { template ->
                 val button = Button(this).apply {
                     text = template.code
                     setOnClickListener { onRecordTemplateClicked(data, template) }
                 }
-                recordTemplateButtons.add(template to button)
+                recordTemplateButtons.add(RecordTemplateButton(template, button))
                 recordsButtons.addView(
                     button,
                     LinearLayout.LayoutParams(
@@ -1151,6 +1226,7 @@ class MainActivity : Activity() {
                 )
             }
             updateRecordButtons(trackingService?.latestPosition())
+            refreshCustomRecordButtons(data)
         }
 
         private fun updateRecordButtons(position: TrackPoint?) {
@@ -1166,12 +1242,115 @@ class MainActivity : Activity() {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val projectMatches = prefs.getString(KEY_GPX_FOLDER_URI, null) ==
                 prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null)
-            recordTemplateButtons.forEach { (template, button) ->
-                val key = gridReference?.let { RecordCodeGrid(template.code, it) }
+            recordTemplateButtons.forEach { entry ->
+                val key = gridReference?.let { RecordCodeGrid(entry.identityCode, it) }
                 val isAlreadyRecorded = projectMatches && key != null &&
                     (key in recordedCodeGrids || key in pendingCodeGrids)
-                if (button.isEnabled == isAlreadyRecorded) {
-                    button.isEnabled = !isAlreadyRecorded
+                if (entry.button.isEnabled == isAlreadyRecorded) {
+                    entry.button.isEnabled = !isAlreadyRecorded
+                }
+            }
+        }
+
+        private fun refreshCustomRecordButtons(data: ShortcutData) {
+            val template = data.templates.singleOrNull { it.code == "#" } ?: return
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) !=
+                prefs.getString(KEY_GPX_FOLDER_URI, null)
+            ) {
+                return
+            }
+            val uri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse) ?: return
+            saver.execute {
+                try {
+                    val loadedRecords = readSurveyRecords(uri, data)
+                    val records = applyCustomScientificLabels(
+                        loadedRecords,
+                        data.tags,
+                        data.excludedColumnIndices,
+                    )
+                    if (records != loadedRecords) {
+                        writeSurveyRecords(uri, data, loadedRecords, records)
+                    }
+                    runOnUiThread {
+                        if (!isFinishing && shortcutData == data) {
+                            customRecordTemplateButtons.toList().forEach { oldEntry ->
+                                recordsButtons.removeView(oldEntry.rootView)
+                                recordTemplateButtons.remove(oldEntry)
+                            }
+                            customRecordTemplateButtons.clear()
+                            records.asSequence()
+                                .mapNotNull { record ->
+                                    val reference = record.customReferenceCode
+                                    val buttonCode = record.customButtonCode
+                                    if (reference.isNullOrBlank() || buttonCode.isNullOrBlank()) {
+                                        null
+                                    } else {
+                                        SpecialRecordButton(
+                                            reference,
+                                            buttonCode,
+                                            record.customButtonComment,
+                                        )
+                                    }
+                                }
+                                .forEach { specialButton ->
+                                    val button = Button(this).apply {
+                                        text = specialButton.label
+                                        setOnClickListener {
+                                            onRecordTemplateClicked(
+                                                data,
+                                                template,
+                                                scientificOverride = specialButton.label,
+                                                identityCode = specialButton.label,
+                                            )
+                                        }
+                                    }
+                                    val rootView = if (specialButton.comment.isNullOrBlank()) {
+                                        button
+                                    } else {
+                                        LinearLayout(this).apply {
+                                            orientation = LinearLayout.VERTICAL
+                                            addView(button, LinearLayout.LayoutParams(
+                                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                                            ))
+                                            addView(TextView(this@MainActivity).apply {
+                                                text = specialButton.comment
+                                                textSize = 13f
+                                                setTextColor(Color.rgb(100, 110, 103))
+                                                setPadding(dp(12), dp(2), dp(12), dp(8))
+                                            })
+                                        }
+                                    }
+                                    val entry = RecordTemplateButton(
+                                        template,
+                                        button,
+                                        specialButton.label,
+                                        rootView,
+                                    )
+                                    customRecordTemplateButtons.add(entry)
+                                    recordTemplateButtons.add(entry)
+                                    recordsButtons.addView(
+                                        rootView,
+                                        LinearLayout.LayoutParams(
+                                            LinearLayout.LayoutParams.MATCH_PARENT,
+                                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                                        ).apply { topMargin = dp(8) },
+                                    )
+                                }
+                            updateRecordButtons(trackingService?.latestPosition())
+                        }
+                    }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        if (!isFinishing && shortcutData == data) {
+                            Toast.makeText(
+                                this,
+                                "Unable to load custom record buttons: ${error.message ?: "storage error"}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
                 }
             }
         }
@@ -1191,9 +1370,65 @@ class MainActivity : Activity() {
             }
         }
 
+        private fun restoreTrackedGridReferences() {
+            trackedGridReferences.clear()
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val activeUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)
+            if (activeUri == null || activeUri != prefs.getString(KEY_ACTIVE_RECORDS_INDEX_URI, null)) {
+                return
+            }
+            trackedGridReferences.addAll(
+                prefs.getStringSet(KEY_ACTIVE_TRACKED_GRID_REFERENCES, emptySet()).orEmpty(),
+            )
+            updateSurveyGridOverlay()
+        }
+
+        private fun addTrackedGridReferences(points: List<TrackPoint>) {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (prefs.getString(KEY_ACTIVE_RECORDS_URI, null) == null ||
+                prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) !=
+                prefs.getString(KEY_GPX_FOLDER_URI, null)
+            ) {
+                return
+            }
+            var changed = false
+            points.forEach { point ->
+                val reference = try {
+                    BritishNationalGrid.toSixFigureGridReference(
+                        BritishNationalGrid.toGridReference(point.easting, point.northing, 8),
+                    )
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+                if (reference != null && trackedGridReferences.add(reference)) {
+                    changed = true
+                }
+            }
+            if (changed) {
+                prefs.edit()
+                    .putStringSet(KEY_ACTIVE_TRACKED_GRID_REFERENCES, trackedGridReferences.toSet())
+                    .apply()
+                updateSurveyGridOverlay()
+            }
+        }
+
+        private fun updateSurveyGridOverlay() {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val isActiveProject = prefs.getString(KEY_ACTIVE_RECORDS_URI, null) != null &&
+                prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) ==
+                prefs.getString(KEY_GPX_FOLDER_URI, null)
+            if (!isActiveProject) {
+                mapView.setSurveyGridSquares(emptyMap())
+                return
+            }
+            mapView.setSurveyGridSquares(
+                mergeSurveyTrackSquares(recordSurveyGridSquares, trackedGridReferences),
+            )
+        }
+
         private fun setRecordedCodeGrids(records: List<SurveyRecord>) {
             recordedCodeGrids.clear()
-            records.forEach { recordedCodeGrids.add(RecordCodeGrid(it.code, it.gridReference)) }
+            records.forEach { recordedCodeGrids.add(RecordCodeGrid(it.recordIdentityCode, it.gridReference)) }
         }
 
         private fun surveyTaxaSquares(
@@ -1214,7 +1449,8 @@ class MainActivity : Activity() {
             if (recordsValue == null || activeProject == null ||
                 activeProject != prefs.getString(KEY_GPX_FOLDER_URI, null)
             ) {
-                mapView.setSurveyGridSquares(emptyMap())
+                recordSurveyGridSquares = emptyMap()
+                updateSurveyGridOverlay()
                 return
             }
             val uri = Uri.parse(recordsValue)
@@ -1228,7 +1464,8 @@ class MainActivity : Activity() {
                                 .getString(KEY_ACTIVE_RECORDS_URI, null) == recordsValue &&
                             shortcutData === data
                         ) {
-                            mapView.setSurveyGridSquares(squares)
+                            recordSurveyGridSquares = squares
+                            updateSurveyGridOverlay()
                         }
                     }
                 } catch (error: Exception) {
@@ -1296,6 +1533,10 @@ class MainActivity : Activity() {
                     entry.getString("code"),
                     entry.getString("grid"),
                     (0 until fields.length()).map { fields.getString(it) },
+                    entry.optString("customReferenceCode").takeIf { it.isNotEmpty() },
+                    entry.optString("customButtonCode").takeIf { it.isNotEmpty() },
+                    entry.optString("customButtonComment").takeIf { it.isNotEmpty() },
+                    entry.optString("identityCode").takeIf { it.isNotEmpty() },
                 )
             }
             if (rows.drop(1) != records.map { it.values }) {
@@ -1319,10 +1560,14 @@ class MainActivity : Activity() {
                     put("code", record.code)
                     put("grid", record.gridReference)
                     put("values", JSONArray(record.values))
+                    record.customReferenceCode?.let { put("customReferenceCode", it) }
+                    record.customButtonCode?.let { put("customButtonCode", it) }
+                    record.customButtonComment?.let { put("customButtonComment", it) }
+                    record.identityCode?.let { put("identityCode", it) }
                 })
             }
             val keys = newRecords.map {
-                val code = Base64.encodeToString(it.code.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                val code = Base64.encodeToString(it.recordIdentityCode.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                 "$code:${it.gridReference}"
             }.toSet()
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -1395,7 +1640,8 @@ class MainActivity : Activity() {
                             shortcutData = data
                             setRecordedCodeGrids(records)
                             updateRecordButtons(trackingService?.latestPosition())
-                            mapView.setSurveyGridSquares(surveyTaxaSquares(records, data))
+                            recordSurveyGridSquares = surveyTaxaSquares(records, data)
+                            updateSurveyGridOverlay()
                             showSurveyRecords(uri, data, records)
                         }
                     }
@@ -1431,7 +1677,7 @@ class MainActivity : Activity() {
                     }
                 }
                 card.addView(TextView(this).apply {
-                    text = "Code: ${record.code}"
+                    text = "Code: ${displayCodeForRecord(record)}"
                     textSize = 16f
                     setTypeface(null, Typeface.BOLD)
                     setTextColor(Color.rgb(32, 45, 37))
@@ -1720,7 +1966,9 @@ class MainActivity : Activity() {
                             if (!isFinishing) {
                                 setRecordedCodeGrids(updated)
                                 updateRecordButtons(trackingService?.latestPosition())
-                                mapView.setSurveyGridSquares(surveyTaxaSquares(updated, data))
+                                recordSurveyGridSquares = surveyTaxaSquares(updated, data)
+                                updateSurveyGridOverlay()
+                                refreshCustomRecordButtons(data)
                                 if (currentScreen == Screen.EDIT && request == editRequest) loadSurveyRecords()
                             }
                         }
@@ -1765,7 +2013,169 @@ class MainActivity : Activity() {
             }
         }
 
-        private fun onRecordTemplateClicked(data: ShortcutData, template: ShortcutTemplate) {
+        private fun showSpecialRecordForm(data: ShortcutData, template: ShortcutTemplate) {
+            specialRecordScreen.removeAllViews()
+            val form = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(20), dp(20), dp(16))
+            }
+            form.addView(TextView(this).apply {
+                text = "Create record button"
+                textSize = 21f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.rgb(32, 45, 37))
+            })
+            form.addView(TextView(this).apply {
+                text = "Add a specimen reference and a reusable button code."
+                textSize = 14f
+                setTextColor(Color.rgb(100, 110, 103))
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(18) })
+
+            fun addField(labelText: String, input: EditText, accessory: View? = null) {
+                val heading = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(TextView(this@MainActivity).apply {
+                        text = labelText
+                        textSize = 14f
+                        setTypeface(null, Typeface.BOLD)
+                        setTextColor(Color.rgb(55, 65, 58))
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    if (accessory != null) {
+                        addView(accessory)
+                    }
+                }
+                form.addView(heading, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(6) })
+                input.background = GradientDrawable().apply {
+                    setColor(Color.WHITE)
+                    cornerRadius = dp(6).toFloat()
+                    setStroke(dp(1), Color.rgb(205, 211, 206))
+                }
+                input.setPadding(dp(12), dp(10), dp(12), dp(10))
+                form.addView(input, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(14) })
+            }
+
+            val useTextReference = CheckBox(this).apply {
+                text = "Use text"
+                contentDescription = "Use text input for reference code"
+            }
+            val reference = EditText(this).apply {
+                hint = "Required"
+                inputType = InputType.TYPE_CLASS_NUMBER
+                minHeight = dp(48)
+            }
+            useTextReference.setOnCheckedChangeListener { _, useText ->
+                val selection = reference.selectionStart.coerceAtLeast(0)
+                reference.inputType = if (useText) InputType.TYPE_CLASS_TEXT else InputType.TYPE_CLASS_NUMBER
+                reference.setSelection(selection.coerceAtMost(reference.text.length))
+            }
+            addField("Reference code", reference, useTextReference)
+            val buttonCode = EditText(this).apply {
+                hint = "Required"
+                inputType = InputType.TYPE_CLASS_TEXT
+                minHeight = dp(48)
+            }
+            addField("Button code", buttonCode)
+            val comment = EditText(this).apply {
+                hint = "Optional"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                minLines = 3
+                gravity = Gravity.TOP or Gravity.START
+            }
+            speechCommentInput = comment
+            addField(
+                "Comment",
+                comment,
+                Button(this).apply {
+                    text = "Speak"
+                    setOnClickListener { requestCommentSpeech(comment) }
+                },
+            )
+
+            specialRecordScreen.addView(ScrollView(this).apply {
+                isFillViewport = true
+                addView(form)
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ))
+            specialRecordScreen.addView(View(this).apply {
+                setBackgroundColor(Color.rgb(225, 228, 224))
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+            specialRecordScreen.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                setBackgroundColor(Color.rgb(247, 248, 246))
+                addView(Button(this@MainActivity).apply {
+                    text = "Cancel"
+                    setOnClickListener { showScreen(Screen.RECORDS) }
+                })
+                addView(Button(this@MainActivity).apply {
+                    text = "Create"
+                    setOnClickListener {
+                        val referenceValue = reference.text.toString().trim()
+                        val buttonCodeValue = buttonCode.text.toString().trim()
+                        if (referenceValue.isEmpty() || buttonCodeValue.isEmpty()) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Enter both a reference code and a button code.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            return@setOnClickListener
+                        }
+                        if (!useTextReference.isChecked && !isIntegerQuantity(referenceValue)) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Enter a whole-number reference or select Use text.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            return@setOnClickListener
+                        }
+                        onRecordTemplateClicked(
+                            data,
+                            template,
+                            commentOverride = comment.text.toString(),
+                            customButtonRegistration = SpecialRecordButton(
+                                referenceValue,
+                                buttonCodeValue,
+                                comment.text.toString().takeIf(String::isNotBlank),
+                            ),
+                            onSuccess = { showScreen(Screen.RECORDS) },
+                        )
+                    }
+                })
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            recordsScreen.visibility = View.GONE
+            specialRecordScreen.visibility = View.VISIBLE
+        }
+
+        private fun onRecordTemplateClicked(
+            data: ShortcutData,
+            template: ShortcutTemplate,
+            scientificOverride: String? = null,
+            commentOverride: String? = null,
+            customButtonRegistration: SpecialRecordButton? = null,
+            identityCode: String? = null,
+            onSuccess: (() -> Unit)? = null,
+        ) {
+            if (template.code == "#" && customButtonRegistration == null && identityCode == null) {
+                showSpecialRecordForm(data, template)
+                return
+            }
             val service = trackingService
             if (service?.snapshot()?.isTracking != true) {
                 Toast.makeText(this, "Start a survey before recording an observation.", Toast.LENGTH_LONG).show()
@@ -1821,31 +2231,54 @@ class MainActivity : Activity() {
                 ).show()
                 return
             }
-            val recordKey = RecordCodeGrid(template.code, gridReference)
+            val recordIdentityCode = identityCode ?: customButtonRegistration?.label ?: template.code
+            val recordKey = RecordCodeGrid(recordIdentityCode, gridReference)
             if (recordKey in recordedCodeGrids || recordKey in pendingCodeGrids) return
             pendingCodeGrids.add(recordKey)
             updateRecordButtons(point)
             val values = renderShortcutValues(
                 data.headers, data.excludedColumnIndices, data.tags, template.fields,
                 date, time, gridReference, locationName,
+                comment = commentOverride,
+                scientific = scientificOverride ?: customButtonRegistration?.label,
             )
 
             saver.execute {
                 try {
                     saveTrackToDocument(trackUri, trackPoints)
                     val records = readSurveyRecords(recordsUri, data)
-                    if (records.any { it.code == recordKey.code && it.gridReference == recordKey.gridReference }) {
+                    if (customButtonRegistration != null &&
+                        isSpecimenReferenceUsed(records, customButtonRegistration.referenceCode)
+                    ) {
+                        throw DuplicateSpecimenReferenceException()
+                    }
+                    if (records.any {
+                            it.recordIdentityCode == recordKey.code &&
+                                it.gridReference == recordKey.gridReference
+                        }
+                    ) {
                         throw IOException("This code has already been recorded at this grid reference.")
                     }
-                    val updated = records + SurveyRecord(template.code, gridReference, values)
+                    val updated = records + SurveyRecord(
+                        template.code,
+                        gridReference,
+                        values,
+                        customReferenceCode = customButtonRegistration?.referenceCode,
+                        customButtonCode = customButtonRegistration?.buttonCode,
+                        customButtonComment = customButtonRegistration?.comment,
+                        identityCode = recordIdentityCode.takeIf { it != template.code },
+                    )
                     writeSurveyRecords(recordsUri, data, records, updated)
                     runOnUiThread {
                         if (!isFinishing) {
                             pendingCodeGrids.remove(recordKey)
                             setRecordedCodeGrids(updated)
                             updateRecordButtons(trackingService?.latestPosition())
-                            mapView.setSurveyGridSquares(surveyTaxaSquares(updated, data))
+                            recordSurveyGridSquares = surveyTaxaSquares(updated, data)
+                            updateSurveyGridOverlay()
                             showRecordCreatedMessage(locationName)
+                            if (customButtonRegistration != null) refreshCustomRecordButtons(data)
+                            onSuccess?.invoke()
                             if (currentScreen == Screen.EDIT) loadSurveyRecords()
                         }
                     }
@@ -1854,11 +2287,19 @@ class MainActivity : Activity() {
                         if (!isFinishing) {
                             pendingCodeGrids.remove(recordKey)
                             updateRecordButtons(trackingService?.latestPosition())
-                            Toast.makeText(
-                                this,
-                                "Unable to save record and GPX checkpoint: ${error.message ?: "storage error"}",
-                                Toast.LENGTH_LONG,
-                            ).show()
+                            if (error is DuplicateSpecimenReferenceException) {
+                                AlertDialog.Builder(this)
+                                    .setTitle("Reference code already used")
+                                    .setMessage("That reference code has already been used for a custom record button in this survey.")
+                                    .setPositiveButton("OK", null)
+                                    .show()
+                            } else {
+                                Toast.makeText(
+                                    this,
+                                    "Unable to save record and GPX checkpoint: ${error.message ?: "storage error"}",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
                         }
                     }
                 }
@@ -2246,6 +2687,7 @@ class MainActivity : Activity() {
         const val KEY_ACTIVE_RECORDS_INDEX_URI = "active_records_index_uri"
         const val KEY_ACTIVE_RECORDS_CODE_GRIDS = "active_records_code_grids"
         const val KEY_ACTIVE_RECORDS_METADATA = "active_records_metadata"
+        const val KEY_ACTIVE_TRACKED_GRID_REFERENCES = "active_tracked_grid_references"
         const val KEY_RECORDS_WRITE_JOURNAL = "records_write_journal"
         const val KEY_ACTIVE_TRACK_URI = "active_track_uri"
         const val KEY_ACTIVE_TRACK_PROJECT_URI = "active_track_project_uri"

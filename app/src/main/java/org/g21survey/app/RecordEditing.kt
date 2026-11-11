@@ -6,9 +6,64 @@ internal data class SurveyRecord(
     val code: String,
     val gridReference: String,
     val values: List<String>,
+    val customReferenceCode: String? = null,
+    val customButtonCode: String? = null,
+    val customButtonComment: String? = null,
+    val identityCode: String? = null,
 )
 
 internal class DuplicateSurveyRecordException : IllegalArgumentException()
+internal class DuplicateSpecimenReferenceException : IllegalArgumentException()
+internal val SurveyRecord.recordIdentityCode: String
+    get() = identityCode ?: code
+
+internal data class SpecialRecordButton(
+    val referenceCode: String,
+    val buttonCode: String,
+    val comment: String? = null,
+) {
+    val label: String
+        get() = "#$referenceCode $buttonCode"
+}
+
+internal fun displayCodeForRecord(record: SurveyRecord): String {
+    val referenceCode = record.customReferenceCode
+    val buttonCode = record.customButtonCode
+    return if (referenceCode.isNullOrBlank() || buttonCode.isNullOrBlank()) {
+        record.identityCode ?: record.code
+    } else {
+        SpecialRecordButton(referenceCode, buttonCode).label
+    }
+}
+
+internal fun applyCustomScientificLabels(
+    records: List<SurveyRecord>,
+    tags: List<String>,
+    excludedColumns: Set<Int>,
+): List<SurveyRecord> {
+    val scientificColumn = outputColumnForTag(tags, excludedColumns, "scientific")
+    val commentColumn = outputColumnForTag(tags, excludedColumns, "comment")
+    if (scientificColumn == null && commentColumn == null) return records
+    return records.map { record ->
+        if (record.customReferenceCode.isNullOrBlank() ||
+            record.customButtonCode.isNullOrBlank()
+        ) {
+            record
+        } else {
+            val values = record.values.toMutableList()
+            scientificColumn?.takeIf { it in values.indices }?.let {
+                values[it] = displayCodeForRecord(record)
+            }
+            val buttonComment = record.customButtonComment ?: commentColumn
+                ?.let { record.values.getOrNull(it)?.takeIf(String::isNotBlank) }
+            if (values == record.values && buttonComment == record.customButtonComment) {
+                record
+            } else {
+                record.copy(values = values, customButtonComment = buttonComment)
+            }
+        }
+    }
+}
 
 internal fun recordColumnForShortcutColumn(shortcutColumn: Int, excludedColumns: Set<Int>): Int? {
     if (shortcutColumn in excludedColumns) return null
@@ -29,19 +84,27 @@ internal fun renderShortcutValues(
     time: String,
     gridReference: String,
     site: String,
+    comment: String? = null,
+    scientific: String? = null,
 ): List<String> = headers.indices.mapNotNull { index ->
     if (recordColumnForShortcutColumn(index, excludedColumns) == null) return@mapNotNull null
     val field = fields.getOrElse(index) { "" }
-    val value = if (field.isBlank()) {
-        when (tags.getOrNull(index)?.trim()?.lowercase(Locale.ROOT)) {
+    val tag = tags.getOrNull(index)?.trim()?.lowercase(Locale.ROOT)
+    val override = when {
+        tag == "comment" && comment != null -> comment
+        tag == "scientific" && scientific != null -> scientific
+        else -> null
+    }
+    if (override != null) return@mapNotNull override
+    val value = when {
+        field.isBlank() -> when (tag) {
             "date" -> date
             "time" -> time
             "gr" -> gridReference
             "site" -> site
             else -> field
         }
-    } else {
-        field
+        else -> field
     }
     value.replace("#date#", date, ignoreCase = true)
         .replace("#time#", time, ignoreCase = true)
@@ -80,7 +143,11 @@ internal fun editSurveyRecord(
     setTaggedValue("quantity", quantity)
     setTaggedValue("site", site)
     setTaggedValue("comment", comment)
-    return record.copy(code = newCode, values = values)
+    return record.copy(
+        code = newCode,
+        values = values,
+        identityCode = if (newCode == record.code) record.identityCode else null,
+    )
 }
 
 internal fun replaceSurveyRecord(
@@ -93,7 +160,7 @@ internal fun replaceSurveyRecord(
         "This record has changed. Return to the list and try again."
     }
     val isDuplicate = replacement != null && records.withIndex().any {
-        it.index != index && it.value.code == replacement.code &&
+        it.index != index && it.value.recordIdentityCode == replacement.recordIdentityCode &&
             it.value.gridReference == replacement.gridReference
     }
     if (isDuplicate) throw DuplicateSurveyRecordException()
@@ -111,6 +178,15 @@ internal fun surveyTaxaGridCounts(
         .groupingBy { BritishNationalGrid.toSixFigureGridReference(it.gridReference) }
         .eachCount()
 
+internal fun mergeSurveyTrackSquares(
+    recordSquares: Map<GridSquare, Int>,
+    trackGridReferences: Set<String>,
+): Map<GridSquare, Int> = recordSquares.toMutableMap().apply {
+    trackGridReferences.forEach { reference ->
+        putIfAbsent(BritishNationalGrid.gridSquareForReference(reference), 0)
+    }
+}
+
 internal fun appendRecognizedSpeech(comment: String, recognizedText: String): String {
     val spoken = recognizedText.trim()
     if (spoken.isEmpty()) return comment
@@ -121,4 +197,11 @@ internal fun appendRecognizedSpeech(comment: String, recognizedText: String): St
 internal fun isIntegerQuantity(value: String): Boolean {
     val trimmed = value.trim()
     return trimmed.isNotEmpty() && trimmed.all { it in '0'..'9' }
+}
+
+internal fun isSpecimenReferenceUsed(records: List<SurveyRecord>, referenceCode: String): Boolean {
+    val normalizedReference = referenceCode.trim()
+    return records.any {
+        it.customReferenceCode?.equals(normalizedReference, ignoreCase = true) == true
+    }
 }
