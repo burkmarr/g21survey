@@ -39,6 +39,7 @@ import android.text.TextWatcher
 import android.text.style.StyleSpan
 import android.text.format.DateUtils
 import android.util.Base64
+import android.util.Xml
 import android.widget.Toast
 import android.view.Gravity
 import android.view.MotionEvent
@@ -50,7 +51,6 @@ import android.widget.ArrayAdapter
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.NumberPicker
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
@@ -61,9 +61,9 @@ import org.json.JSONObject
 import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.io.IOException
+import org.xmlpull.v1.XmlPullParser
 import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -96,6 +96,18 @@ private data class ShortcutData(
 }
 
 private data class ShortcutLoadResult(val data: ShortcutData?, val message: String)
+private data class PreviousSurveyFiles(
+    val name: String,
+    val displayLabel: String,
+    val records: Uri?,
+    val track: Uri?,
+)
+private data class PreviousSurveyContents(
+    val records: List<SurveyRecord>,
+    val squares: Set<String>,
+    val tracks: List<List<TrackPoint>>,
+    val warnings: List<String>,
+)
 
 class MainActivity : Activity() {
     private val loader = Executors.newSingleThreadExecutor()
@@ -113,7 +125,6 @@ class MainActivity : Activity() {
     private lateinit var projectFolderLabel: TextView
     private lateinit var trackingStatus: TextView
     private lateinit var trackingSummary: TextView
-    private lateinit var movementThresholdPicker: NumberPicker
     private lateinit var mapNavigationItem: NavigationItem
     private lateinit var trackingNavigationItem: NavigationItem
     private lateinit var settingsNavigationItem: NavigationItem
@@ -121,12 +132,24 @@ class MainActivity : Activity() {
     private lateinit var editNavigationItem: NavigationItem
     private lateinit var recordsStatus: TextView
     private lateinit var recordsButtons: LinearLayout
+    private lateinit var previousSurveysList: LinearLayout
+    private lateinit var previousSurveysStatus: TextView
     private val recordTemplateButtons = mutableListOf<RecordTemplateButton>()
     private val customRecordTemplateButtons = mutableListOf<RecordTemplateButton>()
     private val recordedCodeGrids = mutableSetOf<RecordCodeGrid>()
     private val pendingCodeGrids = mutableSetOf<RecordCodeGrid>()
     private val trackedGridReferences = mutableSetOf<String>()
-    private var recordSurveyGridSquares: Map<GridSquare, Int> = emptyMap()
+    private var currentSurveyRecords: List<SurveyRecord> = emptyList()
+    private var previousSurveyRecords: List<SurveyRecord> = emptyList()
+    private var previousSurveySquares: Set<String> = emptySet()
+    private var previousSurveysRequest = 0
+    private var previousSurveysProject: String? = null
+    private var previousSurveysShortcutData: ShortcutData? = null
+    private var previousSurveyListLoaded = false
+    private val previousSurveyFiles = mutableMapOf<String, PreviousSurveyFiles>()
+    private val selectedPreviousSurveyNames = mutableSetOf<String>()
+    private val previousSurveyContents = mutableMapOf<String, PreviousSurveyContents>()
+    private val loadingPreviousSurveyNames = mutableSetOf<String>()
     private var listening = false
     private var trackingService: TrackingService? = null
     private var serviceBound = false
@@ -138,6 +161,7 @@ class MainActivity : Activity() {
     private var speechCommentInput: EditText? = null
     private var currentScreen = Screen.MAP
     private var editRequest = 0
+    private var locationConversionError: String? = null
 
     private val trackingObserver = object : TrackingService.Observer {
         override fun onTrackChanged(
@@ -160,6 +184,9 @@ class MainActivity : Activity() {
                         )
                         updateRecordButtons(currentPosition)
                         addTrackedGridReferences(listOf(currentPosition))
+                    } else if (snapshot?.error != null && trackingService?.latestPosition() == null) {
+                        mapView.clearPosition()
+                        updateRecordButtons(null)
                     }
                     if (snapshot?.isTracking == true) {
                         stopLocationUpdates()
@@ -183,7 +210,9 @@ class MainActivity : Activity() {
             val points = service.trackPoints()
             mapView.setTrack(points)
             addTrackedGridReferences(points + listOfNotNull(service.latestPosition()))
-            (service.latestPosition() ?: points.lastOrNull())?.let {
+            (service.latestPosition() ?: points.lastOrNull().takeIf {
+                snapshot?.isTracking != true && snapshot?.error == null
+            })?.let {
                 mapView.setPosition(it.easting, it.northing, it.accuracyMeters)
                 updateRecordButtons(it)
             }
@@ -202,8 +231,18 @@ class MainActivity : Activity() {
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
-            val (easting, northing) = BritishNationalGrid.fromWgs84(location.latitude, location.longitude)
-            mapView.setPosition(easting, northing, if (location.hasAccuracy()) location.accuracy else null)
+            try {
+                val point = FalseOrigin.position(this@MainActivity, location)
+                locationConversionError = null
+                mapView.setPosition(point.easting, point.northing, point.accuracyMeters)
+            } catch (error: IllegalArgumentException) {
+                mapView.clearPosition()
+                val message = error.message ?: "Could not convert the GPS position."
+                if (locationConversionError != message) {
+                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                }
+                locationConversionError = message
+            }
         }
 
         @Deprecated("Required on older Android versions")
@@ -245,6 +284,7 @@ class MainActivity : Activity() {
         heading.addView(titles, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         mapView = RasterMapView(this)
+        mapView.setFalseTracking(FalseOrigin.enabled(this))
         val content = FrameLayout(this)
         content.addView(
             mapView,
@@ -319,7 +359,7 @@ class MainActivity : Activity() {
             elevation = dp(8).toFloat()
         }
         mapNavigationItem = NavigationItem(this, "Map", tracking = false)
-        trackingNavigationItem = NavigationItem(this, "Tracking", tracking = true)
+        trackingNavigationItem = NavigationItem(this, "Survey", tracking = true)
         settingsNavigationItem = NavigationItem(this, "Settings", tracking = false, settings = true)
         recordsNavigationItem = NavigationItem(this, "Records", tracking = false, records = true)
         editNavigationItem = NavigationItem(this, "Edit", tracking = false, edit = true)
@@ -342,15 +382,15 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, dp(64), 1f),
         )
         navigation.addView(
-            settingsNavigationItem,
-            LinearLayout.LayoutParams(0, dp(64), 1f),
-        )
-        navigation.addView(
             recordsNavigationItem,
             LinearLayout.LayoutParams(0, dp(64), 1f),
         )
         navigation.addView(
             editNavigationItem,
+            LinearLayout.LayoutParams(0, dp(64), 1f),
+        )
+        navigation.addView(
+            settingsNavigationItem,
             LinearLayout.LayoutParams(0, dp(64), 1f),
         )
         root.addView(navigation)
@@ -376,7 +416,7 @@ class MainActivity : Activity() {
         val isSettings = screen == Screen.SETTINGS
         screenTitle.text = when (screen) {
             Screen.MAP -> "g21 Survey"
-            Screen.TRACKING -> "Tracking"
+            Screen.TRACKING -> "Survey"
             Screen.SETTINGS -> "Settings"
             Screen.RECORDS -> "Records"
             Screen.EDIT -> "Edit"
@@ -394,36 +434,23 @@ class MainActivity : Activity() {
         recordsNavigationItem.setItemSelected(screen == Screen.RECORDS)
         editNavigationItem.setItemSelected(screen == Screen.EDIT)
         if (screen == Screen.EDIT) loadSurveyRecords()
+        if (screen == Screen.TRACKING) loadPreviousSurveys()
     }
 
     private fun createTrackingScreen(): View {
-        val screen = LinearLayout(this).apply {
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setPadding(dp(16), dp(16), dp(16), dp(24))
         }
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(20), dp(24), dp(20), dp(12))
-        }
+        val controls = sectionCard("Survey", "Start or end GPS path recording.")
         trackingStatus = TextView(this).apply {
-            text = "Tracking is off"
+            text = "Survey is off"
             textSize = 16f
-            setTextColor(Color.rgb(80, 88, 82))
-            gravity = Gravity.CENTER
-        }
-        movementThresholdPicker = NumberPicker(this).apply {
-            minValue = MIN_MOVEMENT_THRESHOLD_METRES
-            maxValue = MAX_MOVEMENT_THRESHOLD_METRES
-            wrapSelectorWheel = false
-            setFormatter { value -> "$value m" }
-            value = movementThresholdMeters()
-            contentDescription = "Movement threshold in metres"
-            setOnValueChangedListener { _, _, newValue ->
-                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                    .putInt(KEY_MOVEMENT_THRESHOLD, newValue)
-                    .apply()
-                trackingService?.setMovementThreshold(newValue)
+            setTextColor(Color.rgb(55, 65, 58))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.rgb(247, 248, 246))
+                cornerRadius = dp(6).toFloat()
             }
         }
         trackingButton = Button(this).apply {
@@ -442,93 +469,155 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ).apply { bottomMargin = dp(12) },
         )
-        val thresholdRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        thresholdRow.addView(TextView(this).apply {
-            text = "Movement threshold"
-            textSize = 16f
-            setTextColor(Color.rgb(55, 65, 58))
-        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        thresholdRow.addView(
-            movementThresholdPicker,
-            LinearLayout.LayoutParams(dp(100), dp(80)),
-        )
-        controls.addView(
-            thresholdRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(8) },
-        )
         controls.addView(
             trackingButton,
             LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ),
         )
         controls.addView(
             trackingSaveButton,
             LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(8) },
         )
-        screen.addView(controls)
-        screen.addView(
-            View(this),
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ),
-        )
-        val footer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(16))
-            setBackgroundColor(Color.rgb(247, 248, 246))
-        }
-        footer.addView(View(this).apply {
-            setBackgroundColor(Color.rgb(225, 228, 224))
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+        content.addView(controls)
+        val summaryCard = sectionCard("Survey summary", "Track details for the current survey.")
         trackingSummary = TextView(this).apply {
             text = "No current track"
             textSize = 14f
             setTextColor(Color.rgb(55, 65, 58))
-            setPadding(0, dp(12), 0, 0)
+            setLineSpacing(dp(4).toFloat(), 1f)
         }
-        footer.addView(trackingSummary)
-        screen.addView(footer)
-        return screen
+        summaryCard.addView(trackingSummary)
+        content.addView(summaryCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+        val previousCard = sectionCard("Previous surveys", "Select surveys to show their tracks and counts on the map.")
+        previousSurveysStatus = TextView(this).apply {
+            text = "Loading previous surveys..."
+            textSize = 13f
+            setTextColor(Color.rgb(100, 110, 103))
+        }
+        previousSurveysList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        previousCard.addView(previousSurveysStatus)
+        previousCard.addView(Button(this).apply {
+            text = "Refresh previous surveys"
+            setOnClickListener { loadPreviousSurveys(force = true) }
+        })
+        previousCard.addView(previousSurveysList)
+        content.addView(previousCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+        return ScrollView(this).apply {
+            setBackgroundColor(Color.rgb(247, 248, 246))
+            isFillViewport = true
+            addView(content)
+        }
+    }
+
+    private fun sectionCard(title: String, description: String): LinearLayout {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), Color.rgb(225, 228, 224))
+            }
+        }
+        card.addView(TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.rgb(32, 90, 60))
+        })
+        card.addView(TextView(this).apply {
+            text = description
+            textSize = 13f
+            setTextColor(Color.rgb(100, 110, 103))
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = dp(12) })
+        return card
     }
 
     private fun createSettingsScreen(): View {
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(dp(20), dp(24), dp(20), dp(12))
+            setBackgroundColor(Color.rgb(247, 248, 246))
         }
-        screen.addView(TextView(this).apply {
-            text = "Grid reference precision"
-            textSize = 16f
-            setTextColor(Color.rgb(55, 65, 58))
-        }, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ))
+        val settingsContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(24))
+        }
+        fun addCard(card: View) {
+            settingsContent.addView(card, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(12) })
+        }
+
+        val mapCountCard = sectionCard(
+            "Map numbers",
+            "Show survey-record totals or distinct taxa in each 100 m square. Species counts ignore records added with the # button.",
+        )
+        val recordsCountOption = RadioButton(this).apply {
+            id = View.generateViewId()
+            text = "Number of records"
+        }
+        val speciesCountOption = RadioButton(this).apply {
+            id = View.generateViewId()
+            text = "Number of species"
+        }
+        mapCountCard.addView(RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            addView(recordsCountOption)
+            addView(speciesCountOption)
+            check(
+                if (mapGridCountMode() == MapGridCountMode.SPECIES) {
+                    speciesCountOption.id
+                } else {
+                    recordsCountOption.id
+                },
+            )
+            setOnCheckedChangeListener { _, checkedId ->
+                val mode = if (checkedId == speciesCountOption.id) {
+                    MapGridCountMode.SPECIES
+                } else {
+                    MapGridCountMode.RECORDS
+                }
+                prefs.edit().putString(KEY_MAP_GRID_COUNT_MODE, mode.preferenceValue).apply()
+                refreshSurveyTaxaGridCounts()
+            }
+        })
+        addCard(mapCountCard)
+
+        val recordingCard = sectionCard(
+            "Recording",
+            "Set the grid-reference precision and time detail used for new records.",
+        )
         val tenFigureOption = RadioButton(this).apply {
             id = View.generateViewId()
-            text = "10 fig"
+            text = "10 figure"
         }
         val eightFigureOption = RadioButton(this).apply {
             id = View.generateViewId()
-            text = "8 fig"
+            text = "8 figure"
         }
-        val precisionOptions = RadioGroup(this).apply {
+        recordingCard.addView(TextView(this).apply {
+            text = "Grid reference precision"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.rgb(55, 65, 58))
+        })
+        recordingCard.addView(RadioGroup(this).apply {
             orientation = RadioGroup.HORIZONTAL
             addView(tenFigureOption)
             addView(eightFigureOption)
@@ -543,55 +632,145 @@ class MainActivity : Activity() {
                 val precision = if (checkedId == eightFigureOption.id) 8 else 10
                 prefs.edit().putInt(KEY_GRID_REFERENCE_PRECISION, precision).apply()
             }
-        }
-        screen.addView(
-            precisionOptions,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(12) },
-        )
-        val recordSecondsOption = CheckBox(this).apply {
+        })
+        recordingCard.addView(CheckBox(this).apply {
             text = "Record seconds with time"
             isChecked = prefs.getBoolean(KEY_RECORD_TIME_SECONDS, DEFAULT_RECORD_TIME_SECONDS)
             setOnCheckedChangeListener { _, checked ->
                 prefs.edit().putBoolean(KEY_RECORD_TIME_SECONDS, checked).apply()
             }
-        }
-        screen.addView(
-            recordSecondsOption,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(12) },
+        })
+        addCard(recordingCard)
+
+        val movementCard = sectionCard(
+            "Movement threshold",
+            "A track point is recorded when you move farther than this distance.",
         )
-        screen.addView(TextView(this).apply {
-            text = "Current location name"
-            textSize = 16f
+        val thresholdRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        thresholdRow.addView(TextView(this).apply {
+            text = "Distance"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
             setTextColor(Color.rgb(55, 65, 58))
-        }, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val thresholdValue = TextView(this).apply {
+            text = "${movementThresholdMeters()} m"
+            textSize = 16f
+            gravity = Gravity.CENTER
+            contentDescription = "Movement threshold in metres"
+        }
+        val decreaseThreshold = Button(this).apply {
+            text = "-"
+            contentDescription = "Decrease movement threshold"
+            minWidth = dp(56)
+            minHeight = dp(48)
+        }
+        val increaseThreshold = Button(this).apply {
+            text = "+"
+            contentDescription = "Increase movement threshold"
+            minWidth = dp(56)
+            minHeight = dp(48)
+        }
+        fun changeThreshold(delta: Int) {
+            val newValue = (movementThresholdMeters() + delta)
+                .coerceIn(MIN_MOVEMENT_THRESHOLD_METRES, MAX_MOVEMENT_THRESHOLD_METRES)
+            prefs.edit().putInt(KEY_MOVEMENT_THRESHOLD, newValue).apply()
+            trackingService?.setMovementThreshold(newValue)
+            thresholdValue.text = "$newValue m"
+            decreaseThreshold.isEnabled = newValue > MIN_MOVEMENT_THRESHOLD_METRES
+            increaseThreshold.isEnabled = newValue < MAX_MOVEMENT_THRESHOLD_METRES
+        }
+        decreaseThreshold.setOnClickListener { changeThreshold(-1) }
+        increaseThreshold.setOnClickListener { changeThreshold(1) }
+        val initialThreshold = movementThresholdMeters()
+        decreaseThreshold.isEnabled = initialThreshold > MIN_MOVEMENT_THRESHOLD_METRES
+        increaseThreshold.isEnabled = initialThreshold < MAX_MOVEMENT_THRESHOLD_METRES
+        thresholdRow.addView(decreaseThreshold)
+        thresholdRow.addView(thresholdValue, LinearLayout.LayoutParams(
+            dp(72),
             LinearLayout.LayoutParams.WRAP_CONTENT,
         ))
-        screen.addView(
-            EditText(this).apply {
-                hint = "Enter location name"
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
-                setSingleLine(true)
-                setText(prefs.getString(KEY_CURRENT_LOCATION_NAME, ""))
-                addTextChangedListener(object : TextWatcher {
-                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-                    override fun afterTextChanged(s: Editable?) {
-                        prefs.edit().putString(KEY_CURRENT_LOCATION_NAME, s?.toString().orEmpty()).apply()
-                    }
-                })
-            },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(12) },
+        thresholdRow.addView(increaseThreshold)
+        movementCard.addView(thresholdRow)
+        addCard(movementCard)
+
+        val locationCard = sectionCard("Current location", "This name is added to new records.")
+        locationCard.addView(EditText(this).apply {
+            hint = "Enter location name"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            setSingleLine(true)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = dp(6).toFloat()
+                setStroke(dp(1), Color.rgb(205, 211, 206))
+            }
+            setText(prefs.getString(KEY_CURRENT_LOCATION_NAME, ""))
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    prefs.edit().putString(KEY_CURRENT_LOCATION_NAME, s?.toString().orEmpty()).apply()
+                }
+            })
+        })
+        addCard(locationCard)
+
+        val testingCard = sectionCard(
+            "Testing",
+            "Shift GPS positions to the midpoint of an 8-figure grid reference.",
         )
+        val falseOriginInput = EditText(this).apply {
+            hint = "False origin"
+            contentDescription = "False origin"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            setSingleLine(true)
+            setText(FalseOrigin.reference(this@MainActivity))
+            isEnabled = !FalseOrigin.enabled(this@MainActivity)
+        }
+        val falseOriginToggle = CheckBox(this).apply {
+            text = "Use false origin"
+            isChecked = FalseOrigin.enabled(this@MainActivity)
+        }
+        falseOriginInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                FalseOrigin.setReference(this@MainActivity, s?.toString().orEmpty())
+            }
+        })
+        falseOriginToggle.setOnCheckedChangeListener { button, checked ->
+            try {
+                FalseOrigin.setEnabled(this, checked, falseOriginInput.text.toString())
+                falseOriginInput.isEnabled = !checked
+                mapView.setFalseTracking(checked)
+                val service = trackingService
+                service?.onFalseOriginChanged()
+                if (service?.snapshot()?.isTracking != true) {
+                    val position = FalseOrigin.lastPosition(this)
+                    if (position == null) mapView.clearPosition()
+                    else mapView.setPosition(position.easting, position.northing, position.accuracyMeters)
+                }
+            } catch (error: IllegalArgumentException) {
+                button.isChecked = false
+                falseOriginInput.error = error.message ?: "Invalid false origin."
+                Toast.makeText(this, falseOriginInput.error, Toast.LENGTH_LONG).show()
+            }
+        }
+        testingCard.addView(falseOriginToggle)
+        testingCard.addView(TextView(this).apply {
+            text = "False origin"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.rgb(55, 65, 58))
+        })
+        testingCard.addView(falseOriginInput)
+        addCard(testingCard)
+
+        val projectCard = sectionCard("Project folder", "Choose the folder containing this project's files.")
         projectFolderButton = Button(this).apply {
             text = "Choose project folder"
             setOnClickListener { chooseGpxFolder() }
@@ -599,18 +778,24 @@ class MainActivity : Activity() {
         projectFolderLabel = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.rgb(100, 110, 103))
-            gravity = Gravity.CENTER
+            gravity = Gravity.START
             maxLines = 2
         }
-        screen.addView(projectFolderButton)
-        screen.addView(
-            projectFolderLabel,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(4) },
-        )
+        projectCard.addView(projectFolderButton)
+        projectCard.addView(projectFolderLabel, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(6) })
+        addCard(projectCard)
         updateGpxFolderLabel()
+        screen.addView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(settingsContent)
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            0,
+            1f,
+        ))
         return screen
     }
 
@@ -649,6 +834,10 @@ class MainActivity : Activity() {
     }
 
     private fun onTrackingButtonClicked() {
+        if (getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_SURVEY_END_ACTION)) {
+            Toast.makeText(this, "Finish ending the previous survey first.", Toast.LENGTH_LONG).show()
+            return
+        }
         val service = trackingService
         if (service == null) {
             Toast.makeText(this, "Tracking is still starting. Try again shortly.", Toast.LENGTH_SHORT).show()
@@ -718,7 +907,7 @@ class MainActivity : Activity() {
                         recordedCodeGrids.clear()
                         pendingCodeGrids.clear()
                         trackedGridReferences.clear()
-                        recordSurveyGridSquares = emptyMap()
+                        currentSurveyRecords = emptyList()
                         updateSurveyGridOverlay()
                         updateRecordButtons(trackingService?.latestPosition())
                         updateTrackingUi(trackingService?.snapshot())
@@ -752,17 +941,19 @@ class MainActivity : Activity() {
 
     private fun updateTrackingUi(snapshot: TrackSnapshot?) {
         val isTracking = snapshot?.isTracking == true
+        val endPending = getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_SURVEY_END_ACTION)
         trackingButton.isEnabled = !isSavingTrack && !isPreparingRecordsFile
         trackingButton.text = when {
             isPreparingRecordsFile -> "Preparing survey files…"
             else -> "Start survey"
         }
-        trackingButton.isEnabled = trackingButton.isEnabled && snapshot == null
-        trackingSaveButton.isEnabled = !isSavingTrack && snapshot != null
+        trackingButton.isEnabled = trackingButton.isEnabled && snapshot == null && !endPending
+        trackingSaveButton.isEnabled = !isSavingTrack && (snapshot != null || endPending)
         trackingSaveButton.text = if (isSavingTrack) "Saving…" else "End survey"
         trackingStatus.text = when {
             snapshot?.error != null -> snapshot.error
             isTracking -> "Survey in progress"
+            endPending -> "Survey ending incomplete; press End survey to retry"
             snapshot != null -> "Survey stopped; end survey to save"
             else -> "Survey is off"
         }
@@ -870,6 +1061,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Project folder selected.", Toast.LENGTH_SHORT).show()
             loadBasemap()
             loadShortcuts()
+            loadPreviousSurveys()
         } catch (error: Exception) {
             Toast.makeText(
                 this,
@@ -882,38 +1074,112 @@ class MainActivity : Activity() {
     private fun onEndSurveyClicked() {
         val service = trackingService
         val snapshot = service?.snapshot()
-        if (service == null || snapshot == null || isSavingTrack) return
-        isSavingTrack = true
-        if (snapshot.isTracking) service.stopTrack()
-        val points = service.trackPoints()
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val trackUri = prefs.getString(KEY_ACTIVE_TRACK_URI, null)?.let(Uri::parse)
+        if (isSavingTrack) return
+        val pending = prefs.getString(KEY_SURVEY_END_ACTION, null)
+        if (pending != null) {
+            val action = try {
+                SurveyEndAction.valueOf(pending)
+            } catch (error: IllegalArgumentException) {
+                Toast.makeText(this, "Unable to retry ending the survey: invalid saved action.", Toast.LENGTH_LONG).show()
+                return
+            }
+            endSurvey(action)
+            return
+        }
+        if (service == null || snapshot == null) return
+        AlertDialog.Builder(this)
+            .setTitle("End survey")
+            .setMessage("Archive the records and track, or permanently delete both files?")
+            .setPositiveButton("Archive") { _, _ -> endSurvey(SurveyEndAction.ARCHIVE) }
+            .setNegativeButton("Delete") { _, _ -> endSurvey(SurveyEndAction.DELETE) }
+            .setNeutralButton("Cancel", null)
+            .show()
+    }
+
+    private fun endSurvey(action: SurveyEndAction) {
+        val service = trackingService
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val pending = prefs.contains(KEY_SURVEY_END_ACTION)
+        if (isSavingTrack || (!pending && service?.snapshot() == null)) return
+        isSavingTrack = true
+        if (service?.snapshot()?.isTracking == true) service.stopTrack()
+        val points = service?.trackPoints().orEmpty()
+        updateTrackingUi(service?.snapshot())
+        if (currentScreen == Screen.EDIT) loadSurveyRecords()
         saver.execute {
             try {
-                val activeProject = prefs.getString(KEY_ACTIVE_TRACK_PROJECT_URI, null)
-                if (trackUri == null || activeProject == null) {
-                    throw IOException("No GPX file is active for this survey.")
+                val project = prefs.getString(KEY_ACTIVE_TRACK_PROJECT_URI, null)
+                    ?: throw IOException("No project folder is active for this survey.")
+                if (project != prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null)) {
+                    throw IOException("The survey files belong to different project folders.")
                 }
-                saveTrackToDocument(trackUri, points)
+                val treeUri = Uri.parse(project)
+                val recordsUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
+                    ?: throw IOException("No records CSV is active for this survey.")
+                val trackUri = prefs.getString(KEY_ACTIVE_TRACK_URI, null)?.let(Uri::parse)
+                    ?: throw IOException("No GPX file is active for this survey.")
+                val sources = listOf(recordsUri, trackUri)
+                if (!pending) {
+                    val children = surveySourceDocuments(treeUri)
+                    sources.forEach { uri ->
+                        if (children.none { it.documentId == DocumentsContract.getDocumentId(uri) }) {
+                            throw IOException("A survey file is missing from the surveys folder.")
+                        }
+                    }
+                    if (action == SurveyEndAction.ARCHIVE && prefs.contains(KEY_RECORDS_WRITE_JOURNAL)) {
+                        val shortcuts = readShortcutTemplates().data
+                            ?: throw IOException("Unable to recover the records CSV; check the selected project.")
+                        readSurveyRecords(recordsUri, shortcuts)
+                    }
+                    if (action == SurveyEndAction.ARCHIVE) saveTrackToDocument(trackUri, points)
+                    if (!prefs.edit().putString(KEY_SURVEY_END_ACTION, action.name).commit()) {
+                        throw IOException("Unable to save the survey ending state.")
+                    }
+                }
+                finalizeSurvey(action, surveyFinalizationStorage(treeUri, sources))
+                if (!prefs.edit()
+                        .remove(KEY_ACTIVE_RECORDS_URI)
+                        .remove(KEY_ACTIVE_RECORDS_PROJECT_URI)
+                        .remove(KEY_ACTIVE_RECORDS_INDEX_URI)
+                        .remove(KEY_ACTIVE_RECORDS_CODE_GRIDS)
+                        .remove(KEY_ACTIVE_RECORDS_METADATA)
+                        .remove(KEY_ACTIVE_TRACKED_GRID_REFERENCES)
+                        .remove(KEY_ACTIVE_TRACK_URI)
+                        .remove(KEY_ACTIVE_TRACK_PROJECT_URI)
+                        .remove(KEY_RECORDS_WRITE_JOURNAL)
+                        .remove(KEY_SURVEY_END_ACTION)
+                        .remove(KEY_ARCHIVE_RECORDS_URI)
+                        .remove(KEY_ARCHIVE_TRACK_URI)
+                        .remove(KEY_ARCHIVE_READY)
+                        .commit()
+                ) throw IOException("Unable to clear the survey ending state.")
                 runOnUiThread {
+                    val cleared = service?.snapshot() == null || service.clearTrack()
                     if (!isFinishing) {
                         isSavingTrack = false
-                        if (trackingService?.clearTrack() == true) {
-                            prefs.edit()
-                                .remove(KEY_ACTIVE_TRACK_URI)
-                                .remove(KEY_ACTIVE_TRACK_PROJECT_URI)
-                                .apply()
-                            if (currentScreen == Screen.EDIT) loadSurveyRecords()
-                            Toast.makeText(this, "Survey ended and GPX track saved.", Toast.LENGTH_LONG).show()
-                        } else {
+                        clearCustomRecordButtons()
+                        if (!cleared) {
                             Toast.makeText(
                                 this,
-                                "The GPX was saved, but the in-memory track could not be cleared.",
+                                "Survey files processed, but the in-memory track could not be cleared.",
                                 Toast.LENGTH_LONG,
                             ).show()
-                            }
+                        } else {
+                            recordedCodeGrids.clear()
+                            pendingCodeGrids.clear()
+                            trackedGridReferences.clear()
+                            currentSurveyRecords = emptyList()
+                            updateSurveyGridOverlay()
+                            loadPreviousSurveys()
+                            updateRecordButtons(trackingService?.latestPosition())
+                            if (currentScreen == Screen.EDIT) loadSurveyRecords()
+                            val result = if (action == SurveyEndAction.ARCHIVE) "archived" else "deleted"
+                            Toast.makeText(this, "Survey $result.", Toast.LENGTH_LONG).show()
+                        }
                         updateTrackingUi(trackingService?.snapshot())
                     }
+
                 }
             } catch (error: Exception) {
                 runOnUiThread {
@@ -931,41 +1197,76 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun surveySourceDocuments(treeUri: Uri): List<ProjectDocument> {
+        val projectId = DocumentsContract.getTreeDocumentId(treeUri)
+        val surveysId = findDirectory(treeUri, projectId, "surveys")
+            ?: throw IOException("The surveys folder is missing.")
+        val currentId = findDirectory(treeUri, surveysId, "current")
+            ?: throw IOException("The surveys/current folder is missing.")
+        return listChildren(treeUri, currentId)
+    }
+
+    private fun surveyFinalizationStorage(treeUri: Uri, sources: List<Uri>): SurveyFinalizationStorage {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val archiveKeys = listOf(KEY_ARCHIVE_RECORDS_URI, KEY_ARCHIVE_TRACK_URI)
+        return object : SurveyFinalizationStorage {
+            override fun archiveReady(): Boolean = prefs.getBoolean(KEY_ARCHIVE_READY, false)
+
+            override fun copyToArchive(index: Int) {
+                val source = sources[index]
+                val document = surveySourceDocuments(treeUri)
+                    .firstOrNull { it.documentId == DocumentsContract.getDocumentId(source) }
+                    ?: throw IOException("A survey file is missing; the archive cannot be completed.")
+                val projectId = DocumentsContract.getTreeDocumentId(treeUri)
+                val surveysId = findOrCreateDirectory(treeUri, projectId, "surveys")
+                val previousId = findOrCreateDirectory(treeUri, surveysId, "previous")
+                val key = archiveKeys[index]
+                val destination = prefs.getString(key, null)?.let(Uri::parse) ?: run {
+                    if (listChildren(treeUri, previousId).any { it.displayName == document.displayName }) {
+                        throw IOException("${document.displayName} already exists in surveys/previous.")
+                    }
+                    val created = DocumentsContract.createDocument(
+                        contentResolver,
+                        DocumentsContract.buildDocumentUriUsingTree(treeUri, previousId),
+                        document.mimeType,
+                        document.displayName,
+                    ) ?: throw IOException("Unable to create archive file ${document.displayName}.")
+                    if (!prefs.edit().putString(key, created.toString()).commit()) {
+                        deleteDocument(created)
+                        throw IOException("Unable to save the archive file location.")
+                    }
+                    created
+                }
+                val input = contentResolver.openInputStream(source)
+                    ?: throw IOException("Unable to read ${document.displayName}.")
+                input.use {
+                    val output = contentResolver.openOutputStream(destination, "wt")
+                        ?: throw IOException("Unable to write archive file ${document.displayName}.")
+                    output.use { target -> it.copyTo(target) }
+                }
+            }
+
+            override fun markArchiveReady() {
+                if (!prefs.edit().putBoolean(KEY_ARCHIVE_READY, true).commit()) {
+                    throw IOException("Unable to save the archive completion state.")
+                }
+            }
+
+            override fun deleteSource(index: Int) {
+                val source = sources[index]
+                if (surveySourceDocuments(treeUri).any {
+                        it.documentId == DocumentsContract.getDocumentId(source)
+                    }) {
+                    deleteDocument(source)
+                }
+            }
+        }
+    }
+
     private fun saveTrackToDocument(fileUri: Uri, points: List<TrackPoint>) {
         val output = contentResolver.openOutputStream(fileUri, "wt")
             ?: throw IOException("Android could not open the survey GPX file for writing.")
         output.bufferedWriter(Charsets.UTF_8).use { writeGpx(it, points) }
-    }
-
-    private fun writeGpx(writer: java.io.BufferedWriter, points: List<TrackPoint>) {
-        val timeFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-        writer.appendLine("""<?xml version="1.0" encoding="UTF-8"?>""")
-        writer.appendLine(
-            """<gpx version="1.1" creator="g21 Survey" xmlns="http://www.topografix.com/GPX/1/1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">""",
-        )
-        writer.appendLine("  <trk>")
-        writer.appendLine("    <name>g21 Survey track</name>")
-        writer.appendLine("    <trkseg>")
-        points.forEach { point ->
-            if (
-                !point.latitude.isFinite() ||
-                !point.longitude.isFinite() ||
-                point.latitude !in -90.0..90.0 ||
-                point.longitude !in -180.0..180.0
-            ) {
-                throw IOException("The track contains an invalid GPS coordinate.")
-            }
-            writer.appendLine(
-                """      <trkpt lat="${String.format(Locale.US, "%.5f", point.latitude)}" lon="${String.format(Locale.US, "%.5f", point.longitude)}">""",
-            )
-            writer.appendLine("        <time>${timeFormat.format(Date(point.timestamp))}</time>")
-            writer.appendLine("      </trkpt>")
-        }
-        writer.appendLine("    </trkseg>")
-        writer.appendLine("  </trk>")
-        writer.appendLine("</gpx>")
     }
 
     private fun readSavedView(): MapViewState? {
@@ -1160,6 +1461,7 @@ class MainActivity : Activity() {
         private fun showShortcutTemplates(result: ShortcutLoadResult) {
             shortcutData = result.data
             refreshSurveyTaxaGridCounts()
+            loadPreviousSurveys()
             recordsStatus.text = result.message
             recordsButtons.removeAllViews()
             recordTemplateButtons.clear()
@@ -1255,6 +1557,7 @@ class MainActivity : Activity() {
         private fun refreshCustomRecordButtons(data: ShortcutData) {
             val template = data.templates.singleOrNull { it.code == "#" } ?: return
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (isSavingTrack || prefs.contains(KEY_SURVEY_END_ACTION)) return
             if (prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) !=
                 prefs.getString(KEY_GPX_FOLDER_URI, null)
             ) {
@@ -1263,6 +1566,9 @@ class MainActivity : Activity() {
             val uri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse) ?: return
             saver.execute {
                 try {
+                    if (prefs.contains(KEY_SURVEY_END_ACTION) ||
+                        prefs.getString(KEY_ACTIVE_RECORDS_URI, null) != uri.toString()
+                    ) return@execute
                     val loadedRecords = readSurveyRecords(uri, data)
                     val records = applyCustomScientificLabels(
                         loadedRecords,
@@ -1273,12 +1579,13 @@ class MainActivity : Activity() {
                         writeSurveyRecords(uri, data, loadedRecords, records)
                     }
                     runOnUiThread {
-                        if (!isFinishing && shortcutData == data) {
-                            customRecordTemplateButtons.toList().forEach { oldEntry ->
-                                recordsButtons.removeView(oldEntry.rootView)
-                                recordTemplateButtons.remove(oldEntry)
-                            }
-                            customRecordTemplateButtons.clear()
+                        if (!isFinishing && shortcutData == data &&
+                            !prefs.contains(KEY_SURVEY_END_ACTION) &&
+                            prefs.getString(KEY_ACTIVE_RECORDS_URI, null) == uri.toString() &&
+                            prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) ==
+                                prefs.getString(KEY_GPX_FOLDER_URI, null)
+                        ) {
+                            clearCustomRecordButtons()
                             records.asSequence()
                                 .mapNotNull { record ->
                                     val reference = record.customReferenceCode
@@ -1355,6 +1662,14 @@ class MainActivity : Activity() {
             }
         }
 
+        private fun clearCustomRecordButtons() {
+            customRecordTemplateButtons.forEach { entry ->
+                recordsButtons.removeView(entry.rootView)
+                recordTemplateButtons.remove(entry)
+            }
+            customRecordTemplateButtons.clear()
+        }
+
         private fun restoreRecordCodeGrids() {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val activeUri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)
@@ -1384,6 +1699,19 @@ class MainActivity : Activity() {
         }
 
         private fun addTrackedGridReferences(points: List<TrackPoint>) {
+            val references = points.mapNotNull { point ->
+                try {
+                    BritishNationalGrid.toSixFigureGridReference(
+                        BritishNationalGrid.toGridReference(point.easting, point.northing, 8),
+                    )
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            }
+            addTrackedReferences(references)
+        }
+
+        private fun addTrackedReferences(references: Collection<String>) {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             if (prefs.getString(KEY_ACTIVE_RECORDS_URI, null) == null ||
                 prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) !=
@@ -1392,15 +1720,8 @@ class MainActivity : Activity() {
                 return
             }
             var changed = false
-            points.forEach { point ->
-                val reference = try {
-                    BritishNationalGrid.toSixFigureGridReference(
-                        BritishNationalGrid.toGridReference(point.easting, point.northing, 8),
-                    )
-                } catch (_: IllegalArgumentException) {
-                    null
-                }
-                if (reference != null && trackedGridReferences.add(reference)) {
+            references.forEach { reference ->
+                if (trackedGridReferences.add(reference)) {
                     changed = true
                 }
             }
@@ -1412,17 +1733,266 @@ class MainActivity : Activity() {
             }
         }
 
+        private fun previousSelectionKey(project: String): String =
+            "previous_surveys_" + Base64.encodeToString(project.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+        private fun loadPreviousSurveys(force: Boolean = false) {
+            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val project = prefs.getString(KEY_GPX_FOLDER_URI, null)
+            if (project == null) {
+                previousSurveysRequest++
+                previousSurveysProject = null
+                previousSurveysShortcutData = null
+                previousSurveyListLoaded = false
+                previousSurveyFiles.clear()
+                selectedPreviousSurveyNames.clear()
+                previousSurveyContents.clear()
+                loadingPreviousSurveyNames.clear()
+                previousSurveyRecords = emptyList()
+                previousSurveySquares = emptySet()
+                mapView.setPreviousTracks(emptyList())
+                updateSurveyGridOverlay()
+                previousSurveysList.removeAllViews()
+                previousSurveysStatus.text = "Select a project folder to view previous surveys."
+                return
+            }
+            val data = shortcutData
+            if (data == null) {
+                previousSurveysStatus.text = "Loading shortcuts before previous surveys..."
+                return
+            }
+            if (
+                !force &&
+                previousSurveyListLoaded &&
+                previousSurveysProject == project &&
+                previousSurveysShortcutData == data
+            ) {
+                refreshPreviousSurveySelection()
+                return
+            }
+
+            val request = ++previousSurveysRequest
+            previousSurveysProject = project
+            previousSurveysShortcutData = data
+            previousSurveyListLoaded = false
+            previousSurveyFiles.clear()
+            previousSurveyContents.clear()
+            loadingPreviousSurveyNames.clear()
+            selectedPreviousSurveyNames.clear()
+            selectedPreviousSurveyNames.addAll(
+                prefs.getStringSet(previousSelectionKey(project), emptySet()).orEmpty(),
+            )
+            val selectedForLoad = selectedPreviousSurveyNames.toSet()
+            previousSurveyRecords = emptyList()
+            previousSurveySquares = emptySet()
+            mapView.setPreviousTracks(emptyList())
+            updateSurveyGridOverlay()
+            previousSurveysList.removeAllViews()
+            previousSurveysStatus.text = "Loading previous surveys..."
+            loader.execute {
+                try {
+                    val tree = Uri.parse(project)
+                    val projectId = DocumentsContract.getTreeDocumentId(tree)
+                    val surveysId = findDirectory(tree, projectId, "surveys")
+                    val previousId = surveysId?.let { findDirectory(tree, it, "previous") }
+                    val documents = previousId?.let { listChildren(tree, it) }.orEmpty()
+                        .filter { it.mimeType != DocumentsContract.Document.MIME_TYPE_DIR }
+                    val names = (documents.mapNotNull {
+                        when {
+                            it.displayName.startsWith("g21s-") && it.displayName.endsWith("-records.csv") ->
+                                it.displayName.removeSuffix("-records.csv")
+                            it.displayName.startsWith("g21s-") && it.displayName.endsWith("-track.gpx") ->
+                                it.displayName.removeSuffix("-track.gpx")
+                            else -> null
+                        }
+                    } + selectedForLoad).distinct().sortedDescending()
+                    val files = names.map { name ->
+                        fun uri(suffix: String): Uri? = documents
+                            .firstOrNull { it.displayName == name + suffix }
+                            ?.let { DocumentsContract.buildDocumentUriUsingTree(tree, it.documentId) }
+                        val recordsUri = uri("-records.csv")
+                        val locationIndex = data?.tags?.indexOfFirst { it.trim().equals("site", true) } ?: -1
+                        val locationHeader = data?.headers?.getOrNull(locationIndex)
+                        val displayLabel = try {
+                            val csv = recordsUri?.let { parseCsv(readRecordsText(it).removePrefix("\uFEFF")) }
+                            previousSurveyDisplayLabel(name, csv, locationHeader)
+                        } catch (_: IOException) {
+                            previousSurveyDisplayLabel(name, null, locationHeader)
+                        } catch (_: SecurityException) {
+                            previousSurveyDisplayLabel(name, null, locationHeader)
+                        }
+                        PreviousSurveyFiles(name, displayLabel, recordsUri, uri("-track.gpx"))
+                    }
+                    runOnUiThread {
+                        if (isFinishing || request != previousSurveysRequest) return@runOnUiThread
+                        previousSurveyFiles.clear()
+                        previousSurveyFiles.putAll(files.associateBy { it.name })
+                        previousSurveyListLoaded = true
+                        files.forEach { survey ->
+                            val checkbox = CheckBox(this).apply {
+                                text = survey.displayLabel
+                                isChecked = survey.name in selectedPreviousSurveyNames
+                                setOnCheckedChangeListener { _, checked ->
+                                    if (checked) {
+                                        selectedPreviousSurveyNames.add(survey.name)
+                                    } else {
+                                        selectedPreviousSurveyNames.remove(survey.name)
+                                    }
+                                    prefs.edit().putStringSet(
+                                        previousSelectionKey(project),
+                                        selectedPreviousSurveyNames.toSet(),
+                                    ).apply()
+                                    if (checked) loadPreviousSurveyContents(survey, project, data, request)
+                                    refreshPreviousSurveySelection()
+                                }
+                            }
+                            previousSurveysList.addView(checkbox)
+                        }
+                        selectedPreviousSurveyNames.forEach { name ->
+                            previousSurveyFiles[name]?.let { survey ->
+                                loadPreviousSurveyContents(survey, project, data, request)
+                            }
+                        }
+                        refreshPreviousSurveySelection()
+                    }
+                } catch (error: IOException) {
+                    runOnUiThread {
+                        if (!isFinishing && request == previousSurveysRequest) {
+                            previousSurveysStatus.text = "Unable to load previous surveys: ${error.message}"
+                        }
+                    }
+                } catch (error: SecurityException) {
+                    runOnUiThread {
+                        if (!isFinishing && request == previousSurveysRequest) {
+                            previousSurveysStatus.text = "Unable to access previous surveys: ${error.message}"
+                        }
+                    }
+                } catch (error: IllegalArgumentException) {
+                    runOnUiThread {
+                        if (!isFinishing && request == previousSurveysRequest) {
+                            previousSurveysStatus.text = "Unable to load previous surveys: ${error.message}"
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun loadPreviousSurveyContents(
+            survey: PreviousSurveyFiles,
+            project: String,
+            data: ShortcutData,
+            request: Int,
+        ) {
+            if (survey.name in previousSurveyContents || !loadingPreviousSurveyNames.add(survey.name)) return
+            loader.execute {
+                val contents = readPreviousSurveyContents(survey, data)
+                runOnUiThread {
+                    if (
+                        !isFinishing &&
+                        request == previousSurveysRequest &&
+                        project == previousSurveysProject &&
+                        data == previousSurveysShortcutData
+                    ) {
+                        loadingPreviousSurveyNames.remove(survey.name)
+                        previousSurveyContents[survey.name] = contents
+                        refreshPreviousSurveySelection()
+                    }
+                }
+            }
+        }
+
+        private fun readPreviousSurveyContents(
+            survey: PreviousSurveyFiles,
+            data: ShortcutData,
+        ): PreviousSurveyContents {
+            val warnings = mutableListOf<String>()
+            val records = mutableListOf<SurveyRecord>()
+            val squares = mutableSetOf<String>()
+            val tracks = mutableListOf<List<TrackPoint>>()
+            try {
+                val trackUri = survey.track ?: throw IOException("Track GPX is missing.")
+                val track = readPreviousTrack(trackUri)
+                tracks.addAll(track.segments)
+                squares.addAll(track.squares)
+            } catch (error: IOException) {
+                warnings.add("${survey.name}: ${error.message}")
+            } catch (error: org.xmlpull.v1.XmlPullParserException) {
+                warnings.add("${survey.name}: invalid GPX: ${error.message}")
+            } catch (error: IllegalArgumentException) {
+                warnings.add("${survey.name}: invalid track: ${error.message}")
+            } catch (error: SecurityException) {
+                warnings.add("${survey.name}: cannot read track: ${error.message}")
+            }
+            try {
+                val recordUri = survey.records ?: throw IOException("Records CSV is missing.")
+                val scientificIndex = data.tags.indexOfFirst { it.trim().equals("scientific", true) }
+                val gridIndex = data.tags.indexOfFirst { it.trim().equals("gr", true) }
+                if (scientificIndex !in data.headers.indices || gridIndex !in data.headers.indices) {
+                    throw IOException("shortcuts.csv needs scientific and gr tags to match records.")
+                }
+                val matched = matchPreviousRecords(
+                    parseCsv(readRecordsText(recordUri).removePrefix("\uFEFF")),
+                    data.headers[scientificIndex],
+                    data.headers[gridIndex],
+                    data.templates.map {
+                        PreviousTemplate(it.code, it.fields.getOrNull(scientificIndex).orEmpty())
+                    },
+                )
+                records.addAll(matched.records)
+                squares.addAll(matched.squares)
+                warnings.addAll(matched.warnings.map { "${survey.name}: $it" })
+            } catch (error: IOException) {
+                warnings.add("${survey.name}: ${error.message}")
+            } catch (error: IllegalArgumentException) {
+                warnings.add("${survey.name}: invalid records: ${error.message}")
+            } catch (error: SecurityException) {
+                warnings.add("${survey.name}: cannot read records: ${error.message}")
+            }
+            return PreviousSurveyContents(records, squares, tracks, warnings)
+        }
+
+        private fun refreshPreviousSurveySelection() {
+            val selected = selectedPreviousSurveyNames.mapNotNull(previousSurveyContents::get)
+            previousSurveyRecords = selected.flatMap { it.records }
+            previousSurveySquares = selected.flatMapTo(mutableSetOf()) { it.squares }
+            mapView.setPreviousTracks(selected.flatMap { it.tracks })
+            updateSurveyGridOverlay()
+            val warnings = selected.flatMap { it.warnings }
+            val loadingCount = selectedPreviousSurveyNames.count {
+                it !in previousSurveyContents && it in loadingPreviousSurveyNames
+            }
+            previousSurveysStatus.text = when {
+                warnings.isNotEmpty() && loadingCount > 0 ->
+                    warnings.joinToString("\n") + "\nLoading $loadingCount selected survey(s)..."
+                warnings.isNotEmpty() -> warnings.joinToString("\n")
+                loadingCount > 0 -> "Loading $loadingCount selected survey(s)..."
+                previousSurveyFiles.isEmpty() -> "No previous surveys found."
+                selectedPreviousSurveyNames.isEmpty() -> "Select one or more surveys."
+                else -> "Selected surveys are shown on the map."
+            }
+        }
+
+        private fun readPreviousTrack(uri: Uri): PreviousTrack {
+            val input = contentResolver.openInputStream(uri) ?: throw IOException("Unable to read track GPX.")
+            return input.use {
+                val parser = Xml.newPullParser()
+                parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+                parser.setInput(it, null)
+                parsePreviousTrack(parser)
+            }
+        }
+
         private fun updateSurveyGridOverlay() {
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val isActiveProject = prefs.getString(KEY_ACTIVE_RECORDS_URI, null) != null &&
                 prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null) ==
                 prefs.getString(KEY_GPX_FOLDER_URI, null)
-            if (!isActiveProject) {
-                mapView.setSurveyGridSquares(emptyMap())
-                return
-            }
+            val data = shortcutData
+            val records = previousSurveyRecords + if (isActiveProject) currentSurveyRecords else emptyList()
+            val counts = if (data == null) emptyMap() else surveyTaxaSquares(records, data)
+            val squares = previousSurveySquares + if (isActiveProject) trackedGridReferences else emptySet()
             mapView.setSurveyGridSquares(
-                mergeSurveyTrackSquares(recordSurveyGridSquares, trackedGridReferences),
+                mergeSurveyTrackSquares(counts, squares),
             )
         }
 
@@ -1434,37 +2004,47 @@ class MainActivity : Activity() {
         private fun surveyTaxaSquares(
             records: List<SurveyRecord>,
             data: ShortcutData,
+            mode: MapGridCountMode = mapGridCountMode(),
         ): Map<GridSquare, Int> {
             val surveyCodes = data.templates.filter { it.isSurveyTaxon }.map { it.code }.toSet()
-            return surveyTaxaGridCounts(records, surveyCodes).map { (reference, count) ->
+            return surveyTaxaGridCounts(
+                records,
+                surveyCodes,
+                countSpecies = mode == MapGridCountMode.SPECIES,
+            ).map { (reference, count) ->
                 BritishNationalGrid.gridSquareForReference(reference) to count
             }.toMap()
         }
 
         private fun refreshSurveyTaxaGridCounts() {
             val data = shortcutData ?: return
+            val mode = mapGridCountMode()
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val recordsValue = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)
             val activeProject = prefs.getString(KEY_ACTIVE_RECORDS_PROJECT_URI, null)
-            if (recordsValue == null || activeProject == null ||
+            if (isSavingTrack || prefs.contains(KEY_SURVEY_END_ACTION) ||
+                recordsValue == null || activeProject == null ||
                 activeProject != prefs.getString(KEY_GPX_FOLDER_URI, null)
             ) {
-                recordSurveyGridSquares = emptyMap()
+                currentSurveyRecords = emptyList()
                 updateSurveyGridOverlay()
                 return
             }
             val uri = Uri.parse(recordsValue)
             saver.execute {
                 try {
+                    if (prefs.contains(KEY_SURVEY_END_ACTION) ||
+                        prefs.getString(KEY_ACTIVE_RECORDS_URI, null) != recordsValue
+                    ) return@execute
                     val records = readSurveyRecords(uri, data)
-                    val squares = surveyTaxaSquares(records, data)
                     runOnUiThread {
                         if (!isFinishing &&
                             getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                                 .getString(KEY_ACTIVE_RECORDS_URI, null) == recordsValue &&
-                            shortcutData === data
+                            shortcutData === data &&
+                            mapGridCountMode() == mode
                         ) {
-                            recordSurveyGridSquares = squares
+                            currentSurveyRecords = records
                             updateSurveyGridOverlay()
                         }
                     }
@@ -1624,7 +2204,9 @@ class MainActivity : Activity() {
             val request = ++editRequest
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val uri = prefs.getString(KEY_ACTIVE_RECORDS_URI, null)?.let(Uri::parse)
-            if (trackingService?.snapshot() == null || isSavingTrack || uri == null) {
+            if (trackingService?.snapshot() == null || isSavingTrack ||
+                prefs.contains(KEY_SURVEY_END_ACTION) || uri == null
+            ) {
                 editMessage("Start a survey to view and edit its records.")
                 return
             }
@@ -1640,7 +2222,7 @@ class MainActivity : Activity() {
                             shortcutData = data
                             setRecordedCodeGrids(records)
                             updateRecordButtons(trackingService?.latestPosition())
-                            recordSurveyGridSquares = surveyTaxaSquares(records, data)
+                            currentSurveyRecords = records
                             updateSurveyGridOverlay()
                             showSurveyRecords(uri, data, records)
                         }
@@ -1920,7 +2502,9 @@ class MainActivity : Activity() {
             }
             editScreen.addView(actions)
             fun submit(deleting: Boolean) {
-                if (trackingService?.snapshot() == null || isSavingTrack) {
+                if (trackingService?.snapshot() == null || isSavingTrack ||
+                    getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_SURVEY_END_ACTION)
+                ) {
                     Toast.makeText(this, "The survey is no longer available for editing.", Toast.LENGTH_LONG).show()
                     loadSurveyRecords()
                     return
@@ -1966,7 +2550,7 @@ class MainActivity : Activity() {
                             if (!isFinishing) {
                                 setRecordedCodeGrids(updated)
                                 updateRecordButtons(trackingService?.latestPosition())
-                                recordSurveyGridSquares = surveyTaxaSquares(updated, data)
+                                currentSurveyRecords = updated
                                 updateSurveyGridOverlay()
                                 refreshCustomRecordButtons(data)
                                 if (currentScreen == Screen.EDIT && request == editRequest) loadSurveyRecords()
@@ -2274,7 +2858,7 @@ class MainActivity : Activity() {
                             pendingCodeGrids.remove(recordKey)
                             setRecordedCodeGrids(updated)
                             updateRecordButtons(trackingService?.latestPosition())
-                            recordSurveyGridSquares = surveyTaxaSquares(updated, data)
+                            currentSurveyRecords = updated
                             updateSurveyGridOverlay()
                             showRecordCreatedMessage(locationName)
                             if (customButtonRegistration != null) refreshCustomRecordButtons(data)
@@ -2407,7 +2991,10 @@ class MainActivity : Activity() {
         private fun createSurveyFiles(projectTreeUri: Uri, shortcuts: ShortcutData): SurveyFiles {
             val projectDocumentId = DocumentsContract.getTreeDocumentId(projectTreeUri)
             val surveysDocumentId = findOrCreateDirectory(projectTreeUri, projectDocumentId, "surveys")
-            val existingNames = listChildren(projectTreeUri, surveysDocumentId)
+            val currentDocumentId = findOrCreateDirectory(projectTreeUri, surveysDocumentId, "current")
+            val previousDocumentId = findDirectory(projectTreeUri, surveysDocumentId, "previous")
+            val existingNames = (listChildren(projectTreeUri, currentDocumentId) +
+                (previousDocumentId?.let { listChildren(projectTreeUri, it) } ?: emptyList()))
                 .map { it.displayName }
                 .toSet()
             var createdAt = System.currentTimeMillis()
@@ -2419,9 +3006,9 @@ class MainActivity : Activity() {
                 trackFileName = trackFilename(createdAt)
             }
 
-            val recordsUri = createRecordsFile(projectTreeUri, surveysDocumentId, shortcuts, recordsFileName)
+            val recordsUri = createRecordsFile(projectTreeUri, currentDocumentId, shortcuts, recordsFileName)
             try {
-                val trackUri = createTrackFile(projectTreeUri, surveysDocumentId, trackFileName)
+                val trackUri = createTrackFile(projectTreeUri, currentDocumentId, trackFileName)
                 return SurveyFiles(recordsUri, trackUri)
             } catch (error: Exception) {
                 cleanupSurveyFiles(SurveyFiles(recordsUri, Uri.EMPTY), error, includeTrack = false)
@@ -2503,7 +3090,7 @@ class MainActivity : Activity() {
 
         private fun deleteDocument(uri: Uri) {
             if (!DocumentsContract.deleteDocument(contentResolver, uri)) {
-                throw IOException("Android could not remove a partially created survey file.")
+                throw IOException("Android could not remove a survey file.")
             }
         }
 
@@ -2671,6 +3258,17 @@ class MainActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+    private fun mapGridCountMode(): MapGridCountMode =
+        if (
+            getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_MAP_GRID_COUNT_MODE, DEFAULT_MAP_GRID_COUNT_MODE) ==
+            MapGridCountMode.SPECIES.preferenceValue
+        ) {
+            MapGridCountMode.SPECIES
+        } else {
+            MapGridCountMode.RECORDS
+        }
+
     private companion object {
         const val LOCATION_REQUEST = 1
         const val NOTIFICATION_REQUEST = 2
@@ -2691,13 +3289,19 @@ class MainActivity : Activity() {
         const val KEY_RECORDS_WRITE_JOURNAL = "records_write_journal"
         const val KEY_ACTIVE_TRACK_URI = "active_track_uri"
         const val KEY_ACTIVE_TRACK_PROJECT_URI = "active_track_project_uri"
+        const val KEY_SURVEY_END_ACTION = "survey_end_action"
+        const val KEY_ARCHIVE_RECORDS_URI = "archive_records_uri"
+        const val KEY_ARCHIVE_TRACK_URI = "archive_track_uri"
+        const val KEY_ARCHIVE_READY = "archive_ready"
         const val KEY_GRID_REFERENCE_PRECISION = "grid_reference_precision"
+        const val KEY_MAP_GRID_COUNT_MODE = "map_grid_count_mode"
         const val KEY_RECORD_TIME_SECONDS = "record_time_seconds"
         const val KEY_CURRENT_LOCATION_NAME = "current_location_name"
         const val KEY_MOVEMENT_THRESHOLD = "movement_threshold"
         const val RECORD_MESSAGE_DURATION_MS = 2500L
         const val RECORD_LOCATION_MESSAGE_DURATION_MS = 850L
         const val DEFAULT_GRID_REFERENCE_PRECISION = 10
+        const val DEFAULT_MAP_GRID_COUNT_MODE = "records"
         const val DEFAULT_RECORD_TIME_SECONDS = true
         const val DEFAULT_MOVEMENT_THRESHOLD_METRES = 5
         const val MIN_MOVEMENT_THRESHOLD_METRES = 1
@@ -2710,6 +3314,11 @@ class MainActivity : Activity() {
         SETTINGS,
         RECORDS,
         EDIT,
+    }
+
+    private enum class MapGridCountMode(val preferenceValue: String) {
+        RECORDS("records"),
+        SPECIES("species"),
     }
 
     override fun onDestroy() {
@@ -2899,6 +3508,13 @@ private class RasterMapView(context: android.content.Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
     }
     private val buttonDot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(25, 118, 210) }
+    private val falseTrackingBackground = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.RED }
+    private val falseTrackingText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 16f * density
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
     private val trackingFlashAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 800L
         repeatCount = ValueAnimator.INFINITE
@@ -2914,9 +3530,11 @@ private class RasterMapView(context: android.content.Context) : View(context) {
     private var positionY: Double? = null
     private var positionAccuracy: Float? = null
     private var trackingActive = false
+    private var falseTracking = false
     private var trackingFlashVisible = false
     private var flashRed = false
     private val trackPoints = mutableListOf<TrackPoint>()
+    private var previousTracks: List<List<TrackPoint>> = emptyList()
     private var surveyGridSquares: Map<GridSquare, Int> = emptyMap()
     private val tiles = mutableListOf<RasterTile>()
     private val scaleDetector = ScaleGestureDetector(
@@ -2964,13 +3582,19 @@ private class RasterMapView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
+    fun setFalseTracking(active: Boolean) {
+        falseTracking = active
+        updateTrackingFlash()
+        invalidate()
+    }
+
     fun setTrackingFlashVisible(visible: Boolean) {
         trackingFlashVisible = visible
         updateTrackingFlash()
     }
 
     private fun updateTrackingFlash() {
-        if (trackingActive && trackingFlashVisible) {
+        if ((trackingActive || falseTracking) && trackingFlashVisible) {
             if (!trackingFlashAnimator.isStarted) trackingFlashAnimator.start()
         } else {
             trackingFlashAnimator.cancel()
@@ -3057,9 +3681,21 @@ private class RasterMapView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
+    fun clearPosition() {
+        positionX = null
+        positionY = null
+        positionAccuracy = null
+        invalidate()
+    }
+
     fun setTrack(points: List<TrackPoint>) {
         trackPoints.clear()
         trackPoints.addAll(points)
+        invalidate()
+    }
+
+    fun setPreviousTracks(tracks: List<List<TrackPoint>>) {
+        previousTracks = tracks
         invalidate()
     }
 
@@ -3142,6 +3778,7 @@ private class RasterMapView(context: android.content.Context) : View(context) {
         if (tiles.isEmpty()) {
             val message = errorMessage ?: "Loading basemap…"
             canvas.drawText(message, width / 2f, height / 2f, textPaint)
+            drawFalseTrackingNotice(canvas)
             return
         }
 
@@ -3153,18 +3790,18 @@ private class RasterMapView(context: android.content.Context) : View(context) {
             canvas.drawBitmap(tile.bitmap, null, RectF(left, top, right, bottom), bitmapPaint)
         }
 
-        if (trackPoints.isNotEmpty()) {
+        (previousTracks + listOf(trackPoints)).filter { it.isNotEmpty() }.forEach { segment ->
             val path = Path()
-            trackPoints.forEachIndexed { index, point ->
+            segment.forEachIndexed { index, point ->
                 val x = offsetX + point.easting.toFloat() * mapScale
                 val y = offsetY - point.northing.toFloat() * mapScale
                 if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
-            if (trackPoints.size > 1) {
+            if (segment.size > 1) {
                 canvas.drawPath(path, trackUnderlay)
                 canvas.drawPath(path, trackPaint)
             } else {
-                val point = trackPoints.first()
+                val point = segment.first()
                 val x = offsetX + point.easting.toFloat() * mapScale
                 val y = offsetY - point.northing.toFloat() * mapScale
                 canvas.drawCircle(x, y, 4f * density, trackUnderlay)
@@ -3204,6 +3841,19 @@ private class RasterMapView(context: android.content.Context) : View(context) {
             canvas.drawCircle(x, y, markerRadius, markerOutline)
         }
         drawLocateButton(canvas)
+        drawFalseTrackingNotice(canvas)
+    }
+
+    private fun drawFalseTrackingNotice(canvas: Canvas) {
+        if (!falseTracking || !flashRed) return
+        val label = "False tracking"
+        val halfWidth = falseTrackingText.measureText(label) / 2f + 12f * density
+        val top = 12f * density
+        val bottom = top + 32f * density
+        canvas.drawRoundRect(width / 2f - halfWidth, top, width / 2f + halfWidth, bottom,
+            4f * density, 4f * density, falseTrackingBackground)
+        val baseline = (top + bottom - falseTrackingText.ascent() - falseTrackingText.descent()) / 2f
+        canvas.drawText(label, width / 2f, baseline, falseTrackingText)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {

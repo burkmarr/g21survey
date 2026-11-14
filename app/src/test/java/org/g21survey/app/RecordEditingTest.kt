@@ -78,6 +78,27 @@ class RecordEditingTest {
     }
 
     @Test
+    fun `survey grid species counts are unique and ignore hash records`() {
+        val firstSquareRef = BritishNationalGrid.toGridReference(352123.0, 518456.0, 10)
+        val sameSquareRef = BritishNationalGrid.toGridReference(352129.0, 518459.0, 8)
+        val otherSquareRef = BritishNationalGrid.toGridReference(352250.0, 518550.0, 10)
+        val records = listOf(
+            record.copy(code = "survey-a", gridReference = firstSquareRef),
+            record.copy(code = "survey-a", gridReference = sameSquareRef),
+            record.copy(code = "survey-b", gridReference = sameSquareRef),
+            record.copy(code = "#", identityCode = "#123 special", gridReference = sameSquareRef),
+            record.copy(code = "#", identityCode = "#124 special", gridReference = otherSquareRef),
+        )
+
+        assertEquals(
+            mapOf(
+                BritishNationalGrid.toSixFigureGridReference(firstSquareRef) to 2,
+            ),
+            surveyTaxaGridCounts(records, setOf("survey-a", "survey-b", "#"), countSpecies = true),
+        )
+    }
+
+    @Test
     fun `tracked grid squares appear with zero until survey taxa are recorded`() {
         val trackedReference = BritishNationalGrid.toSixFigureGridReference(
             BritishNationalGrid.toGridReference(352123.0, 518456.0, 8),

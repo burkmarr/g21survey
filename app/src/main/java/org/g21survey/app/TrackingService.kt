@@ -15,7 +15,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import kotlin.math.hypot
-import kotlin.math.round
 
 data class TrackPoint(
     val latitude: Double,
@@ -64,20 +63,25 @@ class TrackingService : Service() {
     private var trackingError: String? = null
     private var movementThresholdMeters = DEFAULT_MOVEMENT_THRESHOLD_METRES
     private var latestPosition: TrackPoint? = null
+    private var originChanged = false
+    private var originGeneration = FalseOrigin.generation
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             if (!tracking) return
-            val (easting, northing) =
-                BritishNationalGrid.fromWgs84(location.latitude, location.longitude)
-            val point = TrackPoint(
-                latitude = roundCoordinate(location.latitude),
-                longitude = roundCoordinate(location.longitude),
-                easting = easting,
-                northing = northing,
-                accuracyMeters = if (location.hasAccuracy()) location.accuracy else null,
-                timestamp = location.time,
-            )
+            if (originGeneration != FalseOrigin.generation) {
+                originGeneration = FalseOrigin.generation
+                originChanged = true
+                latestPosition = null
+            }
+            val point = try {
+                FalseOrigin.position(this@TrackingService, location)
+            } catch (error: IllegalArgumentException) {
+                latestPosition = null
+                trackingError = error.message ?: "Could not convert the GPS position."
+                publish()
+                return
+            }
             latestPosition = point
             val current = session ?: run {
                 trackingError = null
@@ -87,7 +91,7 @@ class TrackingService : Service() {
             current.gpsFixCount += 1
             val previous = current.points.lastOrNull()
             if (
-                previous != null &&
+                previous != null && !originChanged &&
                 hypot(point.easting - previous.easting, point.northing - previous.northing) <=
                 movementThresholdMeters.toDouble()
             ) {
@@ -95,7 +99,7 @@ class TrackingService : Service() {
                 publish(currentPosition = point)
                 return
             }
-            if (previous != null) {
+            if (previous != null && !originChanged) {
                 val distance = FloatArray(1)
                 Location.distanceBetween(
                     previous.latitude,
@@ -106,6 +110,7 @@ class TrackingService : Service() {
                 )
                 current.lengthMeters += distance[0]
             }
+            originChanged = false
             current.points.add(point)
             trackingError = null
             publish(newPoint = point, currentPosition = point)
@@ -155,7 +160,21 @@ class TrackingService : Service() {
 
     fun trackPoints(): List<TrackPoint> = session?.points?.toList().orEmpty()
 
-    fun latestPosition(): TrackPoint? = latestPosition
+    fun latestPosition(): TrackPoint? =
+        latestPosition.takeIf { originGeneration == FalseOrigin.generation }
+
+    fun onFalseOriginChanged() {
+        originGeneration = FalseOrigin.generation
+        originChanged = true
+        latestPosition = null
+        try {
+            latestPosition = FalseOrigin.lastPosition(this)
+            trackingError = null
+        } catch (error: IllegalArgumentException) {
+            trackingError = error.message ?: "Could not convert the GPS position."
+        }
+        publish(currentPosition = latestPosition)
+    }
 
     fun setMovementThreshold(metres: Int) {
         require(metres in MIN_MOVEMENT_THRESHOLD_METRES..MAX_MOVEMENT_THRESHOLD_METRES)
@@ -278,8 +297,6 @@ class TrackingService : Service() {
     ) {
         observer?.onTrackChanged(snapshot(), newPoint, trackReplaced, currentPosition)
     }
-
-    private fun roundCoordinate(value: Double): Double = round(value * 100_000.0) / 100_000.0
 
     override fun onDestroy() {
         locationManager.removeUpdates(locationListener)

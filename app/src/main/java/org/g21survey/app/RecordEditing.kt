@@ -172,11 +172,20 @@ internal fun replaceSurveyRecord(
 internal fun surveyTaxaGridCounts(
     records: List<SurveyRecord>,
     surveyTaxaCodes: Set<String>,
-): Map<String, Int> =
-    records.asSequence()
-        .filter { it.code in surveyTaxaCodes }
-        .groupingBy { BritishNationalGrid.toSixFigureGridReference(it.gridReference) }
-        .eachCount()
+    countSpecies: Boolean = false,
+): Map<String, Int> {
+    val surveyRecords = records.filter {
+        it.code in surveyTaxaCodes && (!countSpecies || it.code != "#")
+    }
+    return if (countSpecies) {
+        surveyRecords.groupBy { BritishNationalGrid.toSixFigureGridReference(it.gridReference) }
+            .mapValues { (_, squareRecords) -> squareRecords.map { it.code }.distinct().size }
+    } else {
+        surveyRecords.asSequence()
+            .groupingBy { BritishNationalGrid.toSixFigureGridReference(it.gridReference) }
+            .eachCount()
+    }
+}
 
 internal fun mergeSurveyTrackSquares(
     recordSquares: Map<GridSquare, Int>,

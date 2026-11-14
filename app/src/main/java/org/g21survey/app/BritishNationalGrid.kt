@@ -33,9 +33,13 @@ object BritishNationalGrid {
 
     fun initialize(assetManager: AssetManager) {
         if (gridShifts != null) return
+        initialize(assetManager.open(GRID_ASSET_NAME).use { it.readBytes() })
+    }
+
+    internal fun initialize(bytes: ByteArray) {
+        if (gridShifts != null) return
         synchronized(this) {
             if (gridShifts != null) return
-            val bytes = assetManager.open(GRID_ASSET_NAME).use { it.readBytes() }
             val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             val magic = ByteArray(8)
             header.get(magic)
@@ -63,6 +67,41 @@ object BritishNationalGrid {
         // NTv2 longitudes are positive west, whereas Android GPS longitudes are positive east.
         val osgbLongitude = longitude - longitudeShift / 3600.0
         return projectOsgb36(osgbLatitude, osgbLongitude)
+    }
+
+    fun toWgs84(easting: Double, northing: Double): Pair<Double, Double> {
+        require(easting.isFinite() && northing.isFinite()) { "Invalid grid coordinates." }
+        var latitude = 55.0
+        var longitude = -2.0
+        repeat(12) {
+            val projected = projectOsgb36(latitude, longitude)
+            val latStep = projectOsgb36(latitude + 0.00001, longitude)
+            val lonStep = projectOsgb36(latitude, longitude + 0.00001)
+            val a = (latStep.first - projected.first) / 0.00001
+            val b = (lonStep.first - projected.first) / 0.00001
+            val c = (latStep.second - projected.second) / 0.00001
+            val d = (lonStep.second - projected.second) / 0.00001
+            val determinant = a * d - b * c
+            require(determinant.isFinite() && kotlin.math.abs(determinant) > 1.0) {
+                "Grid position cannot be converted to GPS coordinates."
+            }
+            val eastError = easting - projected.first
+            val northError = northing - projected.second
+            latitude += (eastError * d - b * northError) / determinant
+            longitude += (a * northError - eastError * c) / determinant
+        }
+        val osgbLatitude = latitude
+        val osgbLongitude = longitude
+        repeat(5) {
+            val (latitudeShift, longitudeShift) = interpolateShifts(latitude, longitude)
+            latitude = osgbLatitude - latitudeShift / 3600.0
+            longitude = osgbLongitude + longitudeShift / 3600.0
+        }
+        val result = fromWgs84(latitude, longitude)
+        require(kotlin.math.hypot(result.first - easting, result.second - northing) < 0.01) {
+            "Grid position cannot be converted to GPS coordinates."
+        }
+        return latitude to longitude
     }
 
     private fun interpolateShifts(latitude: Double, longitude: Double): Pair<Double, Double> {
